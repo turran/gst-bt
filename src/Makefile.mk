@@ -1,0 +1,20 @@
+plugindir = $(libdir)/gstreamer-@GST_MAJORMINOR@
+plugin_LTLIBRARIES = src/libgstbt.la
+
+src_libgstbt_la_SOURCES = \
+src/gst_bt.c \
+src/gst_bt_demux.c \
+src/gst_bt_demux.h \
+src/gst_bt_lt.cc \
+src/gst_bt_lt.hh
+
+src_libgstbt_la_CFLAGS = \
+$(GST_BT_CFLAGS)
+
+src_libgstbt_la_CXXFLAGS = \
+$(GST_BT_CFLAGS)
+
+src_libgstbt_la_LIBADD = \
+$(GST_BT_LIBS)
+
+libgstbt_la_LDFLAGS = -no-undefined -module -avoid-version
