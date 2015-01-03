@@ -130,11 +130,27 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
     case piece_finished_alert::alert_type:
      {
         piece_finished_alert *p = alert_cast<piece_finished_alert>(a);
+        torrent_handle h = p->handle;
 
         GST_DEBUG_OBJECT (thiz, "Piece %d completed", p->piece_index);
-        /* TODO read the piece once it is finished and send downstream in order */
+        /* read the piece once it is finished and send downstream in order */
+        h.read_piece (p->piece_index);
         break;
      }
+
+    case read_piece_alert::alert_type:
+      {
+        read_piece_alert *p = alert_cast<read_piece_alert>(a);
+        torrent_handle h = p->handle;
+
+        /* TODO send the new segment */
+        /* TODO send the data downstream */
+        /* prioritize the next piece */
+        if (p->piece + 1 < h.get_torrent_info ().num_pieces ()) {
+          GST_DEBUG_OBJECT (thiz, "Requesting piece %d", p->piece + 1);
+          h.piece_priority (p->piece + 1, 7);
+        }
+      }
 
     case file_completed_alert::alert_type:
       /* TODO send the EOS downstream */
