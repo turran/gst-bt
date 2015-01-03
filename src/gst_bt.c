@@ -3,7 +3,7 @@
 #endif
 
 #include <gst/gst.h>
-#include "gst_bt_demux.h"
+#include "gst_bt_demux.hpp"
 
 GST_DEBUG_CATEGORY (gst_bt_demux_debug);
 

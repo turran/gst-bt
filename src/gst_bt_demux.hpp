@@ -22,6 +22,10 @@ typedef struct _GstBtDemux
 {
   GstElement parent;
   GstAdapter *adapter;
+
+  gpointer session;
+  GstTask *task;
+  GStaticRecMutex task_lock;
 } GstBtDemux;
 
 typedef struct _GstBtDemuxClass
