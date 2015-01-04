@@ -25,7 +25,7 @@ static GstStaticPadTemplate sink_factory =
     GST_STATIC_CAPS ("application/x-bittorrent"));
 
 static GstStaticPadTemplate src_factory =
-    GST_STATIC_PAD_TEMPLATE ("src",
+    GST_STATIC_PAD_TEMPLATE ("src_%02d",
     GST_PAD_SRC,
     GST_PAD_SOMETIMES,
     GST_STATIC_CAPS_ANY);
@@ -112,8 +112,36 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           int i;
 
           GST_INFO_OBJECT (thiz, "Start downloading");
-          GST_DEBUG_OBJECT (thiz, "num pieces: %d, piece length: %d",
+          GST_DEBUG_OBJECT (thiz, "num files: %d, num pieces: %d, "
+              "piece length: %d", p->params.ti->num_files (),
               p->params.ti->num_pieces (), p->params.ti->piece_length ());
+
+          /* create the streams */
+          thiz->num_streams = p->params.ti->num_files ();
+          thiz->streams = g_new0 (GstBtDemuxStream, thiz->num_streams);
+          /* create the pads */
+          for (i = 0; i < thiz->num_streams; i++) {
+            GstPad *pad;
+            gchar *name;
+            file_entry fe;
+
+            name = g_strdup_printf ("src_%02d", i);
+            pad = gst_pad_new_from_static_template (&src_factory, name);
+            g_free (name);
+
+            gst_pad_set_active (pad, TRUE);
+            //gst_pad_set_caps (pad, GST_CAPS_ANY);
+
+            thiz->streams[i].pad = GST_PAD (gst_object_ref (pad));
+
+            /* TODO get the pieces and offsets related to the file */
+            fe = p->params.ti->file_at (i);
+            thiz->streams[i].start_piece = fe.offset / p->params.ti->piece_length();
+            GST_DEBUG_OBJECT (thiz, "Adding pad %s, start_piece: %d",
+                GST_PAD_NAME (pad), thiz->streams[i].start_piece);
+            gst_element_add_pad (GST_ELEMENT (thiz), pad);
+          }
+          gst_element_no_more_pads (GST_ELEMENT (thiz));
 
           /* prioritize the first piece */
           h.piece_priority (0, 7);
@@ -169,7 +197,7 @@ gst_bt_demux_loop (gpointer user_data)
   GstBtDemux *thiz;
   
   thiz = GST_BT_DEMUX (user_data);
-  while (true) {
+  while (!thiz->finished) {
     session *s;
     s = (session *)thiz->session;
 
@@ -210,6 +238,12 @@ gst_bt_demux_change_state (GstElement * element, GstStateChange transition)
 
   switch (transition) {
     case GST_STATE_CHANGE_PAUSED_TO_READY:
+      /* TODO stop downloading */
+      thiz->finished = TRUE;
+      break;
+
+    case GST_STATE_CHANGE_READY_TO_NULL:
+      /* TODO destroy the loop */
       break;
 
     default:
@@ -228,6 +262,19 @@ gst_bt_demux_dispose (GObject * object)
   thiz = GST_BT_DEMUX (object);
 
   GST_DEBUG_OBJECT (thiz, "Disposing");
+
+  /* TODO move this to the cleanup() */
+  if (thiz->streams) {
+    gint i;
+
+    for (i = 0; i < thiz->num_streams; i++) {
+      if (thiz->streams[i].pad)
+        gst_object_unref (thiz->streams[i].pad);
+        thiz->streams[i].pad = NULL;
+    }
+    g_free (thiz->streams);
+    thiz->streams = NULL;
+  }
 
   if (thiz->session) {
     libtorrent::session *session;

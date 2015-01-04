@@ -18,10 +18,25 @@ G_BEGIN_DECLS
 #define GST_IS_BT_DEMUX_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass),\
                                          GST_TYPE_BT_DEMUX))
 
+typedef struct _GstBtDemuxStream
+{
+  gint start_offset;
+  gint start_piece;
+  gint end_offset;
+  gint end_piece;
+  GstPad *pad;
+  gboolean finished;
+} GstBtDemuxStream;
+
 typedef struct _GstBtDemux
 {
   GstElement parent;
   GstAdapter *adapter;
+
+  GstBtDemuxStream *streams;
+  gint num_streams;
+
+  gboolean finished;
 
   gpointer session;
   GstTask *task;
