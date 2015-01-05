@@ -121,9 +121,11 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           thiz->streams = g_new0 (GstBtDemuxStream, thiz->num_streams);
           /* create the pads */
           for (i = 0; i < thiz->num_streams; i++) {
+            GstBtDemuxStream *stream = &thiz->streams[i];
             GstPad *pad;
             gchar *name;
             file_entry fe;
+            int piece_length;
 
             name = g_strdup_printf ("src_%02d", i);
             pad = gst_pad_new_from_static_template (&src_factory, name);
@@ -132,22 +134,33 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             gst_pad_set_active (pad, TRUE);
             //gst_pad_set_caps (pad, GST_CAPS_ANY);
 
-            thiz->streams[i].pad = GST_PAD (gst_object_ref (pad));
+            stream->pad = GST_PAD (gst_object_ref (pad));
 
             /* TODO get the pieces and offsets related to the file */
+            piece_length = p->params.ti->piece_length ();
             fe = p->params.ti->file_at (i);
-            thiz->streams[i].start_piece = fe.offset / p->params.ti->piece_length();
-            GST_DEBUG_OBJECT (thiz, "Adding pad %s, start_piece: %d",
-                GST_PAD_NAME (pad), thiz->streams[i].start_piece);
+            stream->start_piece = fe.offset / piece_length;
+            stream->start_offset = fe.offset % piece_length;
+            stream->end_piece = (fe.offset + fe.size) /piece_length;
+            stream->end_offset = (fe.offset + fe.size) % piece_length;
+
+            GST_DEBUG_OBJECT (thiz, "Adding pad %s, start_piece: %d, "
+                "start_offset: %d, end_start: %d, end_offset: %d",
+                GST_PAD_NAME (pad), stream->start_piece,
+                stream->start_offset, stream->end_piece,
+                stream->end_offset);
             gst_element_add_pad (GST_ELEMENT (thiz), pad);
           }
           gst_element_no_more_pads (GST_ELEMENT (thiz));
 
-          /* prioritize the first piece */
-          h.piece_priority (0, 7);
           /* mark every piece to none-priority */
-          for (i = 1; i < p->params.ti->num_pieces (); i++) {
+          for (i = 0; i < p->params.ti->num_pieces (); i++) {
             h.piece_priority (i, 0);
+          }
+          /* prioritize the first piece of every file */
+          for (i = 0; i < thiz->num_streams; i++) {
+            GstBtDemuxStream *stream = &thiz->streams[i];
+            h.piece_priority (stream->start_piece, 7);
           }
           /* make sure to download sequentially */
           h.set_sequential_download (true);
@@ -168,13 +181,29 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
 
     case read_piece_alert::alert_type:
       {
+        int i;
         read_piece_alert *p = alert_cast<read_piece_alert>(a);
         torrent_handle h = p->handle;
 
         /* TODO send the new segment */
         /* TODO send the data downstream */
+        for (i = 0; i < thiz->num_streams; i++) {
+          GstBtDemuxStream *stream = &thiz->streams[i];
+
+          if (p->piece >= stream->start_piece && p->piece <= stream->end_piece) {
+            GstBuffer *buf;
+
+            buf = gst_buffer_new ();
+            /* TODO handle the offsets */
+            GST_DEBUG_OBJECT (thiz, "Pushing buffer on on file %d", i);
+            GST_BUFFER_DATA (buf) = (guint8 *)p->buffer.get ();
+            GST_BUFFER_SIZE (buf) = p->size;
+            gst_pad_push (stream->pad, buf);
+          }
+        }
         /* prioritize the next piece */
-        if (p->piece + 1 < h.get_torrent_info ().num_pieces ()) {
+        if (p->piece + 1 < h.get_torrent_info ().num_pieces () &&
+            h.piece_priority (p->piece + 1) != 7) {
           GST_DEBUG_OBJECT (thiz, "Requesting piece %d", p->piece + 1);
           h.piece_priority (p->piece + 1, 7);
         }
