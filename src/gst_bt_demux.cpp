@@ -504,10 +504,14 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
 
           /* make sure to download sequentially */
           h.set_sequential_download (true);
-
-          /* time to activate the streams */
-          gst_bt_demux_activate_streams (thiz);
         }
+        break;
+      }
+
+    case torrent_checked_alert::alert_type:
+      {
+        /* time to activate the streams */
+        gst_bt_demux_activate_streams (thiz);
         break;
       }
 
