@@ -55,10 +55,10 @@ G_DEFINE_TYPE (GstBtDemuxStream, gst_bt_demux_stream, GST_TYPE_PAD);
 static gboolean
 gst_bt_demux_stream_event (GstPad * pad, GstEvent * event)
 {
-  GstBtDemuxStream *thiz;
+  GstBtDemux *thiz;
   gboolean ret;
 
-  thiz = GST_BT_DEMUX_STREAM (gst_pad_get_parent (pad));
+  thiz = GST_BT_DEMUX (gst_pad_get_parent (pad));
 
   GST_DEBUG_OBJECT (thiz, "Event");
 
@@ -72,10 +72,10 @@ gst_bt_demux_stream_event (GstPad * pad, GstEvent * event)
 static gboolean
 gst_bt_demux_stream_query (GstPad * pad, GstQuery * query)
 {
-  GstBtDemuxStream *thiz;
+  GstBtDemux *thiz;
   gboolean ret;
 
-  thiz = GST_BT_DEMUX_STREAM (gst_pad_get_parent (pad));
+  thiz = GST_BT_DEMUX (gst_pad_get_parent (pad));
   
   GST_DEBUG_OBJECT (thiz, "Quering");
 
@@ -378,9 +378,28 @@ gst_bt_demux_activate_streams (GstBtDemux * thiz)
     stream->requested = TRUE;
 
     GST_DEBUG_OBJECT (thiz, "Requesting stream %s", GST_PAD_NAME (stream));
-    /* TODO use the segment of every pad instead of the first piece */
-    if (h.piece_priority (stream->start_piece) != 7) {
-      GST_DEBUG_OBJECT (thiz, "Requesting piece %d", stream->start_piece);
+
+    if (h.have_piece (stream->start_piece)) {
+      /* request the first non-downloaded piece */
+      if (stream->start_piece != stream->end_piece) {
+        int i;
+
+        for (i = stream->start_piece + 1; i <= stream->end_piece; i++) {
+          if (!h.have_piece (i)) {
+            GST_DEBUG_OBJECT (thiz, "Requesting piece %d, current: %d, "
+                "last downloaded: %d", i, stream->current_piece, i - 1);
+            h.piece_priority (i, 7);
+            break;
+          }
+        }
+      }
+
+      GST_DEBUG_OBJECT (thiz, "Reading piece %d, current: %d",
+          stream->start_piece, stream->current_piece);
+      h.read_piece (stream->start_piece);
+    } else {
+      GST_DEBUG_OBJECT (thiz, "Requesting piece %d, current: %d",
+          stream->start_piece, stream->current_piece);
       h.piece_priority (stream->start_piece, 7);
     }
   }
@@ -494,16 +513,41 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
 
     case piece_finished_alert::alert_type:
       {
-         piece_finished_alert *p = alert_cast<piece_finished_alert>(a);
-         torrent_handle h = p->handle;
-         torrent_status s = h.status();
+        GSList *walk;
+        piece_finished_alert *p = alert_cast<piece_finished_alert>(a);
+        torrent_handle h = p->handle;
+        torrent_status s = h.status();
 
-         GST_DEBUG_OBJECT (thiz, "Piece %d completed (down: %d kb/s, "
-             "up: %d kb/s, peers: %d)", p->piece_index, s.download_rate / 1000,
-             s.upload_rate  / 1000, s.num_peers);
-         /* read the piece once it is finished and send downstream in order */
-         h.read_piece (p->piece_index);
-         break;
+        GST_DEBUG_OBJECT (thiz, "Piece %d completed (down: %d kb/s, "
+            "up: %d kb/s, peers: %d)", p->piece_index, s.download_rate / 1000,
+            s.upload_rate  / 1000, s.num_peers);
+        /* read the piece once it is finished and send downstream in order */
+        for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+          GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
+
+          if (p->piece_index < stream->start_piece &&
+              p->piece_index > stream->end_piece)
+            continue;
+
+          if (!stream->requested)
+            continue;
+
+          /* download the next piece */
+          if (p->piece_index + 1 <= stream->end_piece &&
+              !h.have_piece (p->piece_index + 1)) {
+              GST_DEBUG_OBJECT (thiz, "Requesting piece %d, current: %d",
+                  p->piece_index + 1, stream->current_piece);
+              h.piece_priority (p->piece_index + 1, 7);
+          }
+
+          /* if we are waiting for this piece for reading, try now */
+          if (stream->current_piece + 1 == p->piece_index) {
+            GST_DEBUG_OBJECT (thiz, "Reading piece %d, current: %d",
+                p->piece_index, stream->current_piece);
+            h.read_piece (p->piece_index);
+          }
+        }
+        break;
       }
 
     case read_piece_alert::alert_type:
@@ -514,6 +558,7 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
         GSList *walk;
         read_piece_alert *p = alert_cast<read_piece_alert>(a);
         torrent_handle h = p->handle;
+        gboolean topology_changed = FALSE;
         int i;
 
         /* TODO send the new segment */
@@ -526,6 +571,7 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
 
           /* in case the pad is active but not requested, disable it */
           if (gst_pad_is_active (GST_PAD (stream)) && !stream->requested) {
+            topology_changed = TRUE;
             gst_element_remove_pad (GST_ELEMENT (thiz), GST_PAD (stream));
             continue;
           }
@@ -533,15 +579,22 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           if (!stream->requested)
             continue;
 
-          /* check that we are being sequential */
-          if (stream->current_piece + 1 != p->piece)
-            continue;
+          /* create the pad if needed */
+          if (!gst_pad_is_active (GST_PAD (stream))) {
+            gst_pad_set_active (GST_PAD (stream), TRUE);
+            gst_element_add_pad (GST_ELEMENT (thiz), GST_PAD (stream));
+            topology_changed = TRUE;
+          }
 
-          /* prioritize the next piece */
+          GST_DEBUG_OBJECT (thiz, "Received piece %d of size %d on file %d",
+              p->piece, p->size, i);
+
+          /* read the next piece */
           if (p->piece + 1 <= stream->end_piece &&
-              h.piece_priority (p->piece + 1) != 7) {
-              GST_DEBUG_OBJECT (thiz, "Requesting piece %d", p->piece + 1);
-              h.piece_priority (p->piece + 1, 7);
+              h.have_piece (p->piece + 1)) {
+            GST_DEBUG_OBJECT (thiz, "Reading piece %d, current: %d",
+                p->piece + 1, stream->current_piece);
+            h.read_piece (p->piece + 1);
           }
 
           buf = gst_buffer_new ();
@@ -564,13 +617,9 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             GST_BUFFER_SIZE (buf) -= GST_BUFFER_SIZE (buf) - stream->end_offset;
           }
 
-          GST_DEBUG_OBJECT (thiz, "Received piece %d of size %d, "
-              "pushing buffer of size %d on file %d", p->piece, p->size,
+
+          GST_DEBUG_OBJECT (thiz, "Pushing buffer of size %d on file %d",
               GST_BUFFER_SIZE (buf), i);
-
-          gst_pad_set_active (GST_PAD (stream), TRUE);
-          gst_element_add_pad (GST_ELEMENT (thiz), GST_PAD (stream));
-
           ret = gst_pad_push (GST_PAD (stream), buf);
 
           /* send the EOS downstream */
@@ -583,9 +632,15 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             stream->finished = TRUE;
           }
 
+          /* low the priority again */
+          h.piece_priority (p->piece, 0);
+
+          /* keep track of the current piece */
           stream->current_piece = p->piece;
         }
-        gst_bt_demux_check_no_more_pads (thiz);
+
+        if (topology_changed)
+          gst_bt_demux_check_no_more_pads (thiz);
       }
 
     case file_completed_alert::alert_type:
