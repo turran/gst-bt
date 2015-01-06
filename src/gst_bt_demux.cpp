@@ -26,10 +26,65 @@ static void gst_bt_demux_buffer_data_free (gpointer data)
 }
 
 /*----------------------------------------------------------------------------*
+ *                           The selector policy                              *
+ *----------------------------------------------------------------------------*/
+static GType
+gst_bt_demux_selector_policy_get_type (void)
+{
+  static GType gst_bt_demux_selector_policy_type = 0;
+  static const GEnumValue selector_policy_types[] = {
+    {GST_BT_DEMUX_SELECTOR_POLICY_ALL, "All streams", "all" },
+    {GST_BT_DEMUX_SELECTOR_POLICY_LARGER, "Larger stream", "larger" },
+    {0, NULL, NULL}
+  };
+
+  if (!gst_bt_demux_selector_policy_type) {
+    gst_bt_demux_selector_policy_type =
+        g_enum_register_static ("GstBtDemuxSelectorPolicy",
+        selector_policy_types);
+  }
+  return gst_bt_demux_selector_policy_type;
+}
+
+/*----------------------------------------------------------------------------*
  *                             The stream class                               *
  *----------------------------------------------------------------------------*/
 
 G_DEFINE_TYPE (GstBtDemuxStream, gst_bt_demux_stream, GST_TYPE_PAD);
+
+static gboolean
+gst_bt_demux_stream_event (GstPad * pad, GstEvent * event)
+{
+  GstBtDemuxStream *thiz;
+  gboolean ret;
+
+  thiz = GST_BT_DEMUX_STREAM (gst_pad_get_parent (pad));
+
+  GST_DEBUG_OBJECT (thiz, "Event");
+
+  ret = TRUE;
+
+  gst_object_unref (thiz);
+
+  return ret;
+}
+
+static gboolean
+gst_bt_demux_stream_query (GstPad * pad, GstQuery * query)
+{
+  GstBtDemuxStream *thiz;
+  gboolean ret;
+
+  thiz = GST_BT_DEMUX_STREAM (gst_pad_get_parent (pad));
+  
+  GST_DEBUG_OBJECT (thiz, "Quering");
+
+  ret = TRUE;
+
+  gst_object_unref (thiz);
+
+  return ret;
+}
 
 static void
 gst_bt_demux_stream_dispose (GObject * object)
@@ -60,6 +115,10 @@ static void
 gst_bt_demux_stream_init (GstBtDemuxStream * thiz)
 {
   thiz->current_piece = -1;
+  gst_pad_set_event_function (GST_PAD (thiz),
+      GST_DEBUG_FUNCPTR (gst_bt_demux_stream_event));
+  gst_pad_set_query_function (GST_PAD (thiz),
+      GST_DEBUG_FUNCPTR (gst_bt_demux_stream_query));
 }
 
 /*----------------------------------------------------------------------------*
@@ -72,6 +131,14 @@ gst_bt_demux_stream_init (GstBtDemuxStream * thiz)
  * temp-location
  * temp-remove
  */
+enum {
+  PROP_0,
+  PROP_SELECTOR_POLICY,
+  PROP_N_STREAMS,
+  PROP_CURRENT_STREAM,
+  PROP_TMP_LOCATION,
+  PROP_TMP_REMOVE,
+};
  
 G_DEFINE_TYPE (GstBtDemux, gst_bt_demux, GST_TYPE_ELEMENT);
 
@@ -86,7 +153,6 @@ static GstStaticPadTemplate src_factory =
     GST_PAD_SRC,
     GST_PAD_SOMETIMES,
     GST_STATIC_CAPS_ANY);
-
 
 /* Accumulate every buffer for processing later */
 static GstFlowReturn
@@ -198,7 +264,6 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             /* get the pieces and offsets related to the file */
             piece_length = p->params.ti->piece_length ();
             fe = p->params.ti->file_at (i);
-            stream->current_piece = -1;
             stream->start_piece = fe.offset / piece_length;
             stream->start_offset = fe.offset % piece_length;
             stream->end_piece = (fe.offset + fe.size) /piece_length;
@@ -398,7 +463,7 @@ gst_bt_demux_dispose (GObject * object)
 
   /* TODO move this to the cleanup() */
   if (thiz->streams) {
-    g_slist_free (thiz->streams);
+    g_slist_free_full (thiz->streams, gst_object_unref);
     thiz->streams = NULL;
   }
 
@@ -426,6 +491,47 @@ gst_bt_demux_dispose (GObject * object)
 }
 
 static void
+gst_bt_demux_set_property (GObject * object, guint prop_id,
+    const GValue * value, GParamSpec * pspec)
+{
+  GstBtDemux *thiz = NULL;
+
+  g_return_if_fail (GST_IS_BT_DEMUX (object));
+
+  thiz = GST_BT_DEMUX (object);
+
+  switch (prop_id) {
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static void
+gst_bt_demux_get_property (GObject * object, guint prop_id, GValue * value,
+    GParamSpec * pspec)
+{
+  GstBtDemux *thiz = NULL;
+
+  g_return_if_fail (GST_IS_BT_DEMUX (object));
+
+  thiz = GST_BT_DEMUX (object);
+  switch (prop_id) {
+    case PROP_N_STREAMS:
+      g_value_set_int (value, g_slist_length (thiz->streams));
+      break;
+
+    case PROP_SELECTOR_POLICY:
+      g_value_set_enum (value, thiz->policy);
+      break;
+
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static void
 gst_bt_demux_class_init (GstBtDemuxClass * klass)
 {
   GObjectClass *gobject_class;
@@ -438,6 +544,17 @@ gst_bt_demux_class_init (GstBtDemuxClass * klass)
 
   /* initialize the object class */
   gobject_class->dispose = GST_DEBUG_FUNCPTR (gst_bt_demux_dispose);
+  gobject_class->set_property = GST_DEBUG_FUNCPTR (gst_bt_demux_set_property);
+  gobject_class->get_property = GST_DEBUG_FUNCPTR (gst_bt_demux_get_property);
+  g_object_class_install_property (gobject_class, PROP_N_STREAMS,
+      g_param_spec_int ("n-streams", "Number of streams",
+          "Get the total number of available streams",
+          0, G_MAXINT, 0, G_PARAM_READABLE));
+  g_object_class_install_property (gobject_class, PROP_SELECTOR_POLICY,
+      g_param_spec_enum ("selector-policy", "Stream selector policy",
+          "Specifies the automatic stream selector policy when no stream is "
+          "selected", gst_bt_demux_selector_policy_get_type(),
+          0, (GParamFlags)G_PARAM_READWRITE));
 
   /* initialize the element class */
   gst_element_class_add_pad_template (element_class,
@@ -481,4 +598,7 @@ gst_bt_demux_init (GstBtDemux * thiz)
   g_static_rec_mutex_init (&thiz->task_lock);
   thiz->task = gst_task_create (gst_bt_demux_loop, thiz);
   gst_task_set_lock (thiz->task, &thiz->task_lock);
+
+  /* default properties */
+  thiz->policy = GST_BT_DEMUX_SELECTOR_POLICY_LARGER;
 }

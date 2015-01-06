@@ -30,6 +30,11 @@ G_BEGIN_DECLS
 #define GST_IS_BT_DEMUX_STREAM_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass),\
                                                GST_TYPE_BT_DEMUX_STREAM))
 
+typedef enum _GstBtDemuxSelectorPolicy {
+  GST_BT_DEMUX_SELECTOR_POLICY_ALL,
+  GST_BT_DEMUX_SELECTOR_POLICY_LARGER,
+} GstBtDemuxSelectorPolicy;
+
 typedef struct _GstBtDemuxStream
 {
   GstPad pad;
@@ -52,6 +57,7 @@ typedef struct _GstBtDemux
   GstElement parent;
   GstAdapter *adapter;
 
+  GstBtDemuxSelectorPolicy policy;
   GSList *streams;
 
   gboolean finished;
