@@ -30,6 +30,7 @@ G_BEGIN_DECLS
 #define GST_IS_BT_DEMUX_STREAM_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass),\
                                                GST_TYPE_BT_DEMUX_STREAM))
 
+/* TODO add the FIRST policy */
 typedef enum _GstBtDemuxSelectorPolicy {
   GST_BT_DEMUX_SELECTOR_POLICY_ALL,
   GST_BT_DEMUX_SELECTOR_POLICY_LARGER,
@@ -43,6 +44,7 @@ typedef struct _GstBtDemuxStream
   gint start_piece;
   gint end_offset;
   gint end_piece;
+  gboolean requested;
   gboolean finished;
 } GstBtDemuxStream;
 
@@ -59,6 +61,7 @@ typedef struct _GstBtDemux
 
   GstBtDemuxSelectorPolicy policy;
   GSList *streams;
+  gchar *requested_streams;
 
   gboolean finished;
 
