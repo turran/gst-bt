@@ -554,6 +554,14 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
         break;
       }
 
+    case block_finished_alert::alert_type:
+      {
+        /* TODO in case this block belongs to the piece we are waiting for,
+         * update the buffering level
+         */
+        break;
+      }
+
     case read_piece_alert::alert_type:
       {
         GstFlowReturn ret;
