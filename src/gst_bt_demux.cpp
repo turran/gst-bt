@@ -124,13 +124,6 @@ gst_bt_demux_stream_init (GstBtDemuxStream * thiz)
 /*----------------------------------------------------------------------------*
  *                            The demuxer class                               *
  *----------------------------------------------------------------------------*/
-/* 
- * TODO add properties for:
- * download policy: largest, all
- * current_stream
- * temp-location
- * temp-remove
- */
 enum {
   PROP_0,
   PROP_SELECTOR_POLICY,
@@ -139,6 +132,15 @@ enum {
   PROP_TMP_LOCATION,
   PROP_TMP_REMOVE,
 };
+
+enum
+{
+  SIGNAL_GET_STREAM_TAGS,
+  SIGNAL_STREAMS_CHANGED,
+  LAST_SIGNAL
+};
+
+static guint gst_bt_demux_signals[LAST_SIGNAL] = { 0 };
  
 G_DEFINE_TYPE (GstBtDemux, gst_bt_demux, GST_TYPE_ELEMENT);
 
@@ -213,6 +215,69 @@ beach:
   return res;
 }
 
+/* Code taken from playbin2 to marshal the action prototype */
+#define g_marshal_value_peek_int(v)      g_value_get_int (v)
+void
+gst_bt_demux_cclosure_marshal_BOXED__INT (GClosure     * closure,
+                             GValue       * return_value G_GNUC_UNUSED,
+                             guint         n_param_values,
+                             const GValue * param_values,
+                             gpointer      invocation_hint G_GNUC_UNUSED,
+                             gpointer      marshal_data)
+{
+  typedef gpointer (*GMarshalFunc_BOXED__INT) (gpointer     data1,
+                                               gint         arg_1,
+                                               gpointer     data2);
+  register GMarshalFunc_BOXED__INT callback;
+  register GCClosure * cc = (GCClosure *) closure;
+  register gpointer data1, data2;
+  gpointer v_return;
+
+  g_return_if_fail (return_value != NULL);
+  g_return_if_fail (n_param_values == 2);
+
+  if (G_CCLOSURE_SWAP_DATA (closure)) {
+    data1 = closure->data;
+    data2 = g_value_peek_pointer (param_values + 0);
+  }
+  else {
+    data1 = g_value_peek_pointer (param_values + 0);
+    data2 = closure->data;
+  }
+  callback =
+      (GMarshalFunc_BOXED__INT) (marshal_data ? marshal_data : cc->callback);
+
+  v_return =
+      callback (data1, g_marshal_value_peek_int (param_values + 1), data2);
+
+  g_value_take_boxed (return_value, v_return);
+}
+
+
+static GstTagList *
+gst_bt_demux_get_stream_tags (GstBtDemux * thiz, gint stream)
+{
+  if (!thiz->streams)
+    return NULL;
+
+  /* TODO get the stream tags (i.e metadata) */
+  
+  return NULL;
+}
+
+static void
+gst_bt_demux_activate_streams (GstBtDemux * thiz)
+{
+#if 0
+  if (!thiz->current_stream) {
+    /* use the policy */
+
+  } else {
+    /* use the value */
+  }
+#endif
+}
+
 /* thread reading messages from libtorrent */
 static void
 gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
@@ -282,6 +347,10 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           for (i = 0; i < p->params.ti->num_pieces (); i++) {
             h.piece_priority (i, 0);
           }
+
+          /* inform that we do know the available streams now */
+          g_signal_emit (thiz, gst_bt_demux_signals[SIGNAL_STREAMS_CHANGED], 0);
+
           /* prioritize the first piece of every file */
           for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
             GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
@@ -556,6 +625,18 @@ gst_bt_demux_class_init (GstBtDemuxClass * klass)
           "selected", gst_bt_demux_selector_policy_get_type(),
           0, (GParamFlags)G_PARAM_READWRITE));
 
+  gst_bt_demux_signals[SIGNAL_STREAMS_CHANGED] =
+      g_signal_new ("streams-changed", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST, G_STRUCT_OFFSET (GstBtDemuxClass,
+          streams_changed), NULL, NULL, g_cclosure_marshal_VOID__VOID,
+      G_TYPE_NONE, 0);
+  gst_bt_demux_signals[SIGNAL_GET_STREAM_TAGS] =
+      g_signal_new ("get-stream-tags", G_TYPE_FROM_CLASS (klass),
+      (GSignalFlags) (G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION),
+      G_STRUCT_OFFSET (GstBtDemuxClass, get_stream_tags), NULL, NULL,
+      gst_bt_demux_cclosure_marshal_BOXED__INT, GST_TYPE_TAG_LIST, 1,
+      G_TYPE_INT);
+
   /* initialize the element class */
   gst_element_class_add_pad_template (element_class,
       gst_static_pad_template_get (&sink_factory));
@@ -569,6 +650,9 @@ gst_bt_demux_class_init (GstBtDemuxClass * klass)
       "BitTorrent Demuxer", "Codec/Demuxer",
       "Streams a BitTorrent file",
       "Jorge Luis Zapata <jorgeluis.zapata@gmail.com>");
+
+  /* initialize the demuxer class */
+  klass->get_stream_tags = gst_bt_demux_get_stream_tags;
 }
  
 static void

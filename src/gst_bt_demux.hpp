@@ -70,6 +70,10 @@ typedef struct _GstBtDemux
 typedef struct _GstBtDemuxClass
 {
   GstElementClass parent_class;
+  /* inform that the streams metadata have changed */
+  void (*streams_changed) (GstBtDemux * demux);
+  /* get stream tags for a stream */
+  GstTagList *(*get_stream_tags) (GstBtDemux * demux, gint stream);
 } GstBtDemuxClass;
 
 GType gst_bt_demux_get_type (void);
