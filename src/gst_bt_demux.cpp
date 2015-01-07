@@ -556,9 +556,23 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
 
     case block_finished_alert::alert_type:
       {
-        /* TODO in case this block belongs to the piece we are waiting for,
-         * update the buffering level
-         */
+        GSList *walk;
+        block_finished_alert *p = alert_cast<block_finished_alert>(a);
+
+        for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+          GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
+
+          if (p->piece_index < stream->start_piece &&
+              p->piece_index > stream->end_piece)
+            continue;
+
+          /* in case this block belongs to the piece we are waiting for,
+           * update the buffering level
+           */
+          if (stream->current_piece + 1 == p->piece_index) {
+          }
+        }
+
         break;
       }
 
