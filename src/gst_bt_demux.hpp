@@ -46,6 +46,8 @@ typedef struct _GstBtDemuxStream
   gint end_piece;
   gboolean requested;
   gboolean finished;
+  gint blocks;
+  gint buffering;
 } GstBtDemuxStream;
 
 typedef struct _GstBtDemuxStreamClass {
@@ -64,8 +66,11 @@ typedef struct _GstBtDemux
   gchar *requested_streams;
 
   gboolean finished;
+  gboolean buffering;
 
   gpointer session;
+  gint block_size;
+
   GstTask *task;
   GStaticRecMutex task_lock;
 } GstBtDemux;
