@@ -474,10 +474,11 @@ gst_bt_demux_send_buffering (GstBtDemux * thiz)
 }
 
 /* thread reading messages from libtorrent */
-static void
+static gboolean
 gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
 {
   using namespace libtorrent;
+  gboolean ret = FALSE;
 
   GST_LOG_OBJECT (thiz, "Received alert '%s'", a->what());
 
@@ -684,6 +685,7 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           /* in case the pad is active but not requested, disable it */
           if (gst_pad_is_active (GST_PAD (stream)) && !stream->requested) {
             topology_changed = TRUE;
+            gst_pad_set_active (GST_PAD (stream), FALSE);
             gst_element_remove_pad (GST_ELEMENT (thiz), GST_PAD (stream));
             continue;
           }
@@ -694,7 +696,8 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           /* create the pad if needed */
           if (!gst_pad_is_active (GST_PAD (stream))) {
             gst_pad_set_active (GST_PAD (stream), TRUE);
-            gst_element_add_pad (GST_ELEMENT (thiz), GST_PAD (stream));
+            gst_element_add_pad (GST_ELEMENT (thiz), GST_PAD (
+                gst_object_ref (stream)));
             topology_changed = TRUE;
           }
 
@@ -754,15 +757,24 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
         if (topology_changed)
           gst_bt_demux_check_no_more_pads (thiz);
       }
+      break;
+
+    case torrent_removed_alert::alert_type:
+      /* a safe cleanup, the torrent has been removed */
+      ret = TRUE;
+      break;
 
     case file_completed_alert::alert_type:
       /* TODO send the EOS downstream */
       /* TODO mark ourselves as done */
       /* TODO quit the main demux loop */
       break;
+
     default:
       break;
   }
+
+  return ret;
 }
 
 static void
@@ -784,11 +796,61 @@ gst_bt_demux_loop (gpointer user_data)
       for (std::deque<libtorrent::alert*>::iterator i = alerts.begin(),
           end(alerts.end()); i != end; ++i) {
 
-        gst_bt_demux_handle_alert (thiz, *i);
+        if (!thiz->finished)
+          thiz->finished = gst_bt_demux_handle_alert (thiz, *i);
         delete *i;
       }
       alerts.clear();
     }
+  }
+}
+
+static void
+gst_bt_demux_task_setup (GstBtDemux * thiz)
+{
+   /* to pop from the libtorrent async system */
+  thiz->task = gst_task_create (gst_bt_demux_loop, thiz);
+  gst_task_set_lock (thiz->task, &thiz->task_lock);
+  gst_task_start (thiz->task);
+}
+
+static void
+gst_bt_demux_task_cleanup (GstBtDemux * thiz)
+{
+  using namespace libtorrent;
+  session *s;
+  std::vector<torrent_handle> torrents;
+
+  s = (session *)thiz->session;
+  torrents = s->get_torrents ();
+
+  if (torrents.size () < 1) {
+    /* nothing added, stop the task directly */
+    thiz->finished = TRUE;
+  } else {
+    torrent_handle h;
+    h = torrents[0];
+    s->remove_torrent (h);
+  }
+  
+  /* given that the pads are removed on the parent class at the paused
+   * to ready state, we need to exit the task and wait for it
+   */
+  if (thiz->task) { 
+    gst_task_stop (thiz->task); 
+    gst_task_join (thiz->task);
+    gst_object_unref (thiz->task);
+    thiz->task = NULL;
+  }
+}
+
+static void
+gst_bt_demux_cleanup (GstBtDemux * thiz)
+{
+  /* remove every pad reference */
+  if (thiz->streams) {
+    g_slist_free_full (thiz->streams, gst_object_unref);
+    thiz->streams = NULL;
   }
 }
 
@@ -802,7 +864,11 @@ gst_bt_demux_change_state (GstElement * element, GstStateChange transition)
 
   switch (transition) {
     case GST_STATE_CHANGE_READY_TO_PAUSED:
-      gst_task_start (thiz->task);
+      gst_bt_demux_task_setup (thiz);
+      break;
+
+    case GST_STATE_CHANGE_PAUSED_TO_READY:
+      gst_bt_demux_task_cleanup (thiz);
       break;
 
     default:
@@ -813,12 +879,10 @@ gst_bt_demux_change_state (GstElement * element, GstStateChange transition)
 
   switch (transition) {
     case GST_STATE_CHANGE_PAUSED_TO_READY:
-      /* TODO stop downloading */
-      thiz->finished = TRUE;
+      gst_bt_demux_cleanup (thiz);
       break;
 
     case GST_STATE_CHANGE_READY_TO_NULL:
-      /* TODO destroy the loop */
       break;
 
     default:
@@ -827,7 +891,6 @@ gst_bt_demux_change_state (GstElement * element, GstStateChange transition)
 
   return ret;
 }
-
 
 static void
 gst_bt_demux_dispose (GObject * object)
@@ -838,11 +901,8 @@ gst_bt_demux_dispose (GObject * object)
 
   GST_DEBUG_OBJECT (thiz, "Disposing");
 
-  /* TODO move this to the cleanup() */
-  if (thiz->streams) {
-    g_slist_free_full (thiz->streams, gst_object_unref);
-    thiz->streams = NULL;
-  }
+  gst_bt_demux_task_cleanup (thiz);
+  gst_bt_demux_cleanup (thiz);
 
   if (thiz->session) {
     libtorrent::session *session;
@@ -852,17 +912,11 @@ gst_bt_demux_dispose (GObject * object)
     thiz->session = NULL;
   }
 
-  if (thiz->task) { 
-    gst_task_stop (thiz->task); 
-    gst_task_join (thiz->task);
-    gst_object_unref (thiz->task);
-    thiz->task = NULL;
-  }
-  
   if (thiz->adapter) {
     g_object_unref (thiz->adapter);
     thiz->adapter = NULL;
   }
+
 
   G_OBJECT_CLASS (gst_bt_demux_parent_class)->dispose (object);
 }
@@ -986,10 +1040,7 @@ gst_bt_demux_init (GstBtDemux * thiz)
       alert::status_notification);
   thiz->session = s;
 
-  /* to pop from the libtorrent async system */
   g_static_rec_mutex_init (&thiz->task_lock);
-  thiz->task = gst_task_create (gst_bt_demux_loop, thiz);
-  gst_task_set_lock (thiz->task, &thiz->task_lock);
 
   /* default properties */
   thiz->policy = GST_BT_DEMUX_SELECTOR_POLICY_LARGER;
