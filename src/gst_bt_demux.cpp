@@ -613,9 +613,10 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             continue;
 
           /* time to mark the stream as buffering with 0% */
-          GST_ERROR ("buffer now!");
-          stream->buffering = TRUE;
-          stream->buffering_level = 0;
+          if (stream->current_piece + 1 == p->piece_index) {
+            stream->buffering = TRUE;
+            stream->buffering_level = 0;
+          }
         }
         gst_bt_demux_send_buffering (thiz);
         break;
