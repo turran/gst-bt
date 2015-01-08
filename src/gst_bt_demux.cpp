@@ -342,6 +342,38 @@ gst_bt_demux_get_policy_streams (GstBtDemux * thiz)
 }
 
 static void
+gst_bt_demux_stream_add_piece (GstBtDemuxStream * thiz,
+    libtorrent::torrent_handle h, int piece, int max_pieces)
+{
+  using namespace libtorrent;
+  int i = thiz->downloading_pieces;
+
+  GST_DEBUG_OBJECT (thiz, "Adding more pieces, current_downloading: %d, "
+      "max: %d", i, max_pieces);
+  for (piece; piece < thiz->end_piece && i < max_pieces; piece++) {
+    int priority;
+
+    if (h.have_piece (piece))
+      continue;
+
+    /* if already scheduled, do nothing */
+    priority = h.piece_priority (piece);
+    if (priority == 7)
+      continue;
+
+    /* max priority */
+    priority = 7;
+
+    h.piece_priority (piece, priority);
+    thiz->downloading_pieces++;
+    GST_DEBUG_OBJECT (thiz, "Requesting piece %d, prio: %d, current: %d, "
+        "downloading: %d", piece, priority, thiz->current_piece,
+        thiz->downloading_pieces);
+    i++;
+  }
+}
+
+static void
 gst_bt_demux_activate_streams (GstBtDemux * thiz)
 {
   using namespace libtorrent;
@@ -382,25 +414,16 @@ gst_bt_demux_activate_streams (GstBtDemux * thiz)
     if (h.have_piece (stream->start_piece)) {
       /* request the first non-downloaded piece */
       if (stream->start_piece != stream->end_piece) {
-        int i;
-
-        for (i = stream->start_piece + 1; i <= stream->end_piece; i++) {
-          if (!h.have_piece (i)) {
-            GST_DEBUG_OBJECT (thiz, "Requesting piece %d, current: %d, "
-                "last downloaded: %d", i, stream->current_piece, i - 1);
-            h.piece_priority (i, 7);
-            break;
-          }
-        }
+        gst_bt_demux_stream_add_piece (stream, h, stream->start_piece,
+          thiz->buffer_pieces);
       }
 
       GST_DEBUG_OBJECT (thiz, "Reading piece %d, current: %d",
           stream->start_piece, stream->current_piece);
       h.read_piece (stream->start_piece);
     } else {
-      GST_DEBUG_OBJECT (thiz, "Requesting piece %d, current: %d",
-          stream->start_piece, stream->current_piece);
-      h.piece_priority (stream->start_piece, 7);
+      gst_bt_demux_stream_add_piece (stream, h, stream->start_piece,
+          thiz->buffer_pieces);
     }
   }
 
@@ -563,6 +586,7 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
         piece_finished_alert *p = alert_cast<piece_finished_alert>(a);
         torrent_handle h = p->handle;
         torrent_status s = h.status();
+        gboolean update_buffering = FALSE;
 
         GST_DEBUG_OBJECT (thiz, "Piece %d completed (down: %d kb/s, "
             "up: %d kb/s, peers: %d)", p->piece_index, s.download_rate / 1000,
@@ -578,20 +602,33 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           if (!stream->requested)
             continue;
 
-          /* download the next piece */
-          if (p->piece_index + 1 <= stream->end_piece &&
-              !h.have_piece (p->piece_index + 1)) {
-              GST_DEBUG_OBJECT (thiz, "Requesting piece %d, current: %d",
-                  p->piece_index + 1, stream->current_piece);
-              h.piece_priority (p->piece_index + 1, 7);
-          }
+          /* low the priority again */
+          h.piece_priority (p->piece_index, 0);
+
+          /* decrement the number of downloading pieces */
+          stream->downloading_pieces--;
+
+          /* download the next pieces */
+          gst_bt_demux_stream_add_piece (stream, h, p->piece_index + 1,
+              thiz->buffer_pieces);
 
           /* if we are waiting for this piece for reading, try now */
           if (stream->current_piece + 1 == p->piece_index) {
+
+            /* finish the buffering */
+            if (stream->buffering) {
+              stream->blocks = 0;
+              stream->buffering_level = 100;
+              update_buffering = TRUE;
+            }
+
             GST_DEBUG_OBJECT (thiz, "Reading piece %d, current: %d",
                 p->piece_index, stream->current_piece);
             h.read_piece (p->piece_index);
           }
+
+          if (update_buffering)
+            gst_bt_demux_send_buffering (thiz);
         }
         break;
       }
@@ -672,6 +709,7 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
         read_piece_alert *p = alert_cast<read_piece_alert>(a);
         torrent_handle h = p->handle;
         gboolean topology_changed = FALSE;
+        gboolean update_buffering = FALSE;
         int i;
 
         /* TODO send the new segment */
@@ -705,11 +743,16 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
               p->piece, p->size, i);
 
           /* read the next piece */
-          if (p->piece + 1 <= stream->end_piece &&
-              h.have_piece (p->piece + 1)) {
-            GST_DEBUG_OBJECT (thiz, "Reading piece %d, current: %d",
-                p->piece + 1, stream->current_piece);
-            h.read_piece (p->piece + 1);
+          if (p->piece + 1 <= stream->end_piece) {
+            if (h.have_piece (p->piece + 1)) {
+              GST_DEBUG_OBJECT (thiz, "Reading piece %d, current: %d",
+                  p->piece + 1, stream->current_piece);
+              h.read_piece (p->piece + 1);
+            } else {
+              stream->buffering = TRUE;
+              stream->buffering_level = 0;
+              update_buffering = TRUE;
+            }
           }
 
           buf = gst_buffer_new ();
@@ -747,15 +790,14 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             stream->finished = TRUE;
           }
 
-          /* low the priority again */
-          h.piece_priority (p->piece, 0);
-
           /* keep track of the current piece */
           stream->current_piece = p->piece;
         }
 
         if (topology_changed)
           gst_bt_demux_check_no_more_pads (thiz);
+        if (update_buffering)
+          gst_bt_demux_send_buffering (thiz);
       }
       break;
 
@@ -1044,4 +1086,5 @@ gst_bt_demux_init (GstBtDemux * thiz)
 
   /* default properties */
   thiz->policy = GST_BT_DEMUX_SELECTOR_POLICY_LARGER;
+  thiz->buffer_pieces = 3;
 }

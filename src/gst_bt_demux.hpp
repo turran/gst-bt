@@ -50,6 +50,7 @@ typedef struct _GstBtDemuxStream
   gboolean finished;
   gboolean buffering;
   gint buffering_level;
+  gint downloading_pieces;
 } GstBtDemuxStream;
 
 typedef struct _GstBtDemuxStreamClass {
@@ -69,6 +70,7 @@ typedef struct _GstBtDemux
 
   gboolean finished;
   gboolean buffering;
+  gint buffer_pieces;
 
   gpointer session;
   gint block_size;
