@@ -433,6 +433,46 @@ gst_bt_demux_check_no_more_pads (GstBtDemux * thiz)
   }
 }
 
+static void
+gst_bt_demux_send_buffering (GstBtDemux * thiz)
+{
+  GSList *walk;
+  int num_buffering = 0;
+  int buffering = 0;
+
+  /* generate the real buffering level */
+  for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+    GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
+
+    if (!stream->requested)
+      continue;
+    if (!stream->buffering)
+      continue;
+    buffering += stream->buffering_level;
+    /* unset the stream buffering */
+    if (stream->buffering_level == 100) {
+      stream->buffering = FALSE;
+      stream->buffering_level = 0;
+    }
+    num_buffering++;
+  }
+
+  if (num_buffering) {
+    gdouble level = ((gdouble) buffering) / num_buffering;
+    if (thiz->buffering) {
+      gst_element_post_message (GST_ELEMENT_CAST (thiz),
+          gst_message_new_buffering (GST_OBJECT_CAST (thiz), level));
+      if (level >= 100.0) {
+        thiz->buffering = FALSE;
+      }
+    } else if (level < 100.0) {
+      gst_element_post_message (GST_ELEMENT_CAST (thiz),
+          gst_message_new_buffering (GST_OBJECT_CAST (thiz), level));
+      thiz->buffering = TRUE;
+    }
+  }
+}
+
 /* thread reading messages from libtorrent */
 static void
 gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
@@ -554,14 +594,10 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
         }
         break;
       }
-
     case block_downloading_alert::alert_type:
       {
         GSList *walk;
         block_downloading_alert *p = alert_cast<block_downloading_alert>(a);
-        torrent_handle h = p->handle;
-        int num_buffering = 0;
-        int buffering = 0;
 
         for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
           GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
@@ -571,6 +607,36 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             continue;
 
           if (!stream->requested)
+            continue;
+
+          if (stream->buffering)
+            continue;
+
+          /* time to mark the stream as buffering with 0% */
+          GST_ERROR ("buffer now!");
+          stream->buffering = TRUE;
+          stream->buffering_level = 0;
+        }
+        gst_bt_demux_send_buffering (thiz);
+        break;
+      }
+    case block_finished_alert::alert_type:
+      {
+        GSList *walk;
+        block_finished_alert *p = alert_cast<block_finished_alert>(a);
+        torrent_handle h = p->handle;
+
+        for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+          GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
+
+          if (p->piece_index < stream->start_piece &&
+              p->piece_index > stream->end_piece)
+            continue;
+
+          if (!stream->requested)
+            continue;
+
+          if (!stream->buffering)
             continue;
 
           /* in case this block belongs to the piece we are waiting for,
@@ -584,39 +650,14 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             piece_size = h.get_torrent_info ().piece_size (p->piece_index);
             block_count = piece_size / thiz->block_size;
 
-            if (stream->buffering == 100)
-              stream->blocks = 1;
-            else
-              stream->blocks++;
-            stream->buffering = (stream->blocks * 100) / block_count;
+            if (stream->blocks == block_count)
+              stream->blocks = 0;
+
+            stream->blocks++;
+            stream->buffering_level = (stream->blocks * 100) / block_count;
           }
         }
-
-        /* generate the real buffering level */
-        for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
-          GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
-
-          if (!stream->requested)
-            continue;
-          buffering += stream->buffering;
-          num_buffering++;
-        }
-
-        if (num_buffering) {
-          gdouble level = ((gdouble) buffering) / num_buffering;
-          if (thiz->buffering) {
-            gst_element_post_message (GST_ELEMENT_CAST (thiz),
-                gst_message_new_buffering (GST_OBJECT_CAST (thiz), level));
-            if (level >= 100.0) {
-              thiz->buffering = FALSE;
-            }
-          } else if (level < 100.0) {
-            gst_element_post_message (GST_ELEMENT_CAST (thiz),
-                gst_message_new_buffering (GST_OBJECT_CAST (thiz), level));
-            thiz->buffering = TRUE;
-          }
-        }
-
+        gst_bt_demux_send_buffering (thiz);
         break;
       }
 

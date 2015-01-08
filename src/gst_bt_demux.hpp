@@ -44,10 +44,12 @@ typedef struct _GstBtDemuxStream
   gint start_piece;
   gint end_offset;
   gint end_piece;
+  gint blocks;
+
   gboolean requested;
   gboolean finished;
-  gint blocks;
-  gint buffering;
+  gboolean buffering;
+  gint buffering_level;
 } GstBtDemuxStream;
 
 typedef struct _GstBtDemuxStreamClass {
