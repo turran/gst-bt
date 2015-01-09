@@ -62,7 +62,7 @@ gst_bt_demux_selector_policy_get_type (void)
 
 G_DEFINE_TYPE (GstBtDemuxStream, gst_bt_demux_stream, GST_TYPE_PAD);
 
-static void
+static gboolean
 gst_bt_demux_stream_start_buffering (GstBtDemuxStream * thiz,
     libtorrent::torrent_handle h, int max_pieces)
 {
@@ -86,8 +86,13 @@ gst_bt_demux_stream_start_buffering (GstBtDemuxStream * thiz,
     thiz->buffering_count++;
   }
 
-  thiz->buffering = TRUE;
-  thiz->buffering_level = 0;
+  if (thiz->buffering_count) {
+    thiz->buffering = TRUE;
+    thiz->buffering_level = 0;
+    return TRUE;
+  } else {
+    return FALSE;
+  }
 }
 
 static void
@@ -153,11 +158,30 @@ static gboolean
 gst_bt_demux_stream_event (GstPad * pad, GstEvent * event)
 {
   GstBtDemux *thiz;
-  gboolean ret;
+  gboolean ret = FALSE;
 
   thiz = GST_BT_DEMUX (gst_pad_get_parent (pad));
 
-  GST_DEBUG_OBJECT (thiz, "Event");
+  GST_DEBUG_OBJECT (thiz, "Event %s", GST_EVENT_TYPE_NAME (event));
+
+  switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_SEEK:
+      {
+        GstFormat format;
+        GstSeekFlags flags;
+        GstSeekType start_type, stop_type;
+        gint64 start, stop;
+        gdouble rate;
+
+        gst_event_parse_seek (event, &rate, &format, &flags, &start_type,
+            &start, &stop_type, &stop);
+        if (format != GST_FORMAT_BYTES)
+          break;
+
+        GST_ERROR ("seek format %d %lld %lld", format, start, stop);
+        break;
+      }
+  }
 
   ret = TRUE;
 
@@ -170,11 +194,11 @@ static gboolean
 gst_bt_demux_stream_query (GstPad * pad, GstQuery * query)
 {
   GstBtDemux *thiz;
-  gboolean ret;
+  gboolean ret = FALSE;
 
   thiz = GST_BT_DEMUX (gst_pad_get_parent (pad));
   
-  GST_DEBUG_OBJECT (thiz, "Quering");
+  GST_DEBUG_OBJECT (thiz, "Quering %s", GST_QUERY_TYPE_NAME (query));
 
   ret = TRUE;
 
@@ -439,73 +463,6 @@ gst_bt_demux_get_policy_streams (GstBtDemux * thiz)
 }
 
 static void
-gst_bt_demux_activate_streams (GstBtDemux * thiz)
-{
-  using namespace libtorrent;
-  GSList *streams = NULL;
-  GSList *walk;
-  session *s;
-  torrent_handle h;
-
-  if (!thiz->streams)
-    return;
-
-  if (!thiz->requested_streams) {
-    /* use the policy */
-    streams = gst_bt_demux_get_policy_streams (thiz);
-  } else {
-    /* TODO use the value */
-  }
-
-  s = (session *)thiz->session;
-  h = s->get_torrents ()[0];
-
-  /* TODO lock the streams */
-
-  /* mark every stream as not requested */
-  for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
-    GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
-    stream->requested = FALSE;
-  }
-
-  /* prioritize the first piece of every requested stream */
-  for (walk = streams; walk; walk = g_slist_next (walk)) {
-    GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
-
-    stream->requested = TRUE;
-
-    GST_DEBUG_OBJECT (thiz, "Requesting stream %s", GST_PAD_NAME (stream));
-
-    if (h.have_piece (stream->start_piece)) {
-      /* request the first non-downloaded piece */
-      if (stream->start_piece != stream->end_piece) {
-        int i;
-
-        for (i = 0; i < thiz->buffer_pieces; i++) {
-          gst_bt_demux_stream_add_piece (stream, h, stream->start_piece + i,
-              thiz->buffer_pieces);
-        }
-      }
-
-      GST_DEBUG_OBJECT (thiz, "Reading piece %d, current: %d",
-          stream->start_piece, stream->current_piece);
-      h.read_piece (stream->start_piece);
-    } else {
-      int i;
-
-      for (i = 0; i < thiz->buffer_pieces; i++) {
-        gst_bt_demux_stream_add_piece (stream, h, stream->start_piece + i,
-            thiz->buffer_pieces);
-      }
-    }
-  }
-
-  /* TODO unlock the streams */
-
-  g_slist_free_full (streams, gst_object_unref);
-}
-
-static void
 gst_bt_demux_check_no_more_pads (GstBtDemux * thiz)
 {
   GSList *walk;
@@ -530,11 +487,13 @@ gst_bt_demux_check_no_more_pads (GstBtDemux * thiz)
 }
 
 static void
-gst_bt_demux_send_buffering (GstBtDemux * thiz)
+gst_bt_demux_send_buffering (GstBtDemux * thiz, libtorrent::torrent_handle h)
 {
+  using namespace libtorrent;
   GSList *walk;
   int num_buffering = 0;
   int buffering = 0;
+  gboolean start_pushing = FALSE;
 
   /* generate the real buffering level */
   for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
@@ -561,6 +520,7 @@ gst_bt_demux_send_buffering (GstBtDemux * thiz)
           gst_message_new_buffering (GST_OBJECT_CAST (thiz), level));
       if (level >= 100.0) {
         thiz->buffering = FALSE;
+        start_pushing = TRUE;
       }
     } else if (level < 100.0) {
       gst_element_post_message (GST_ELEMENT_CAST (thiz),
@@ -568,7 +528,108 @@ gst_bt_demux_send_buffering (GstBtDemux * thiz)
       thiz->buffering = TRUE;
     }
   }
+
+  /* start pushing buffers on every stream */
+  if (start_pushing) {
+    for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+      GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
+
+      if (!stream->requested)
+        continue;
+
+      GST_DEBUG_OBJECT (thiz, "Buffering finished, reading piece %d"
+          ", current: %d", stream->current_piece + 1,
+          stream->current_piece);
+      h.read_piece (stream->current_piece + 1);
+    }
+  }
 }
+
+static void
+gst_bt_demux_activate_streams (GstBtDemux * thiz)
+{
+  using namespace libtorrent;
+  GSList *streams = NULL;
+  GSList *walk;
+  session *s;
+  torrent_handle h;
+  gboolean update_buffering = FALSE;
+
+  if (!thiz->streams)
+    return;
+
+  if (!thiz->requested_streams) {
+    /* use the policy */
+    streams = gst_bt_demux_get_policy_streams (thiz);
+  } else {
+    /* TODO use the value */
+  }
+
+  s = (session *)thiz->session;
+  h = s->get_torrents ()[0];
+
+  /* TODO lock the streams */
+
+  /* mark every stream as not requested */
+  for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+    GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
+
+    /* TODO set the priority to 0 on every piece */
+    stream->requested = FALSE;
+  }
+
+  /* prioritize the first piece of every requested stream */
+  for (walk = streams; walk; walk = g_slist_next (walk)) {
+    GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
+
+    stream->requested = TRUE;
+
+    GST_DEBUG_OBJECT (thiz, "Requesting stream %s", GST_PAD_NAME (stream));
+
+    if (h.have_piece (stream->start_piece)) {
+      /* request the first non-downloaded piece */
+      if (stream->start_piece != stream->end_piece) {
+        int i;
+
+        for (i = 1; i < thiz->buffer_pieces; i++) {
+          gst_bt_demux_stream_add_piece (stream, h, stream->start_piece + i,
+              thiz->buffer_pieces);
+        }
+      }
+
+    } else {
+      int i;
+
+      for (i = 0; i < thiz->buffer_pieces; i++) {
+        gst_bt_demux_stream_add_piece (stream, h, stream->start_piece + i,
+            thiz->buffer_pieces);
+      }
+      /* start the buffering */
+      gst_bt_demux_stream_start_buffering (stream, h, thiz->buffer_pieces);
+      update_buffering = TRUE;
+    }
+  }
+
+  /* wait for the buffering before reading pieces */
+  if (update_buffering) {
+    gst_bt_demux_send_buffering (thiz, h);
+  } else {
+    /* start directly */
+    for (walk = streams; walk; walk = g_slist_next (walk)) {
+      GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
+
+      GST_DEBUG_OBJECT (thiz, "Starting stream '%s', reading piece %d, "
+          "current: %d", GST_PAD_NAME (stream), stream->start_piece,
+          stream->current_piece);
+      h.read_piece (stream->start_piece);
+    }
+  }
+
+  /* TODO unlock the streams */
+
+  g_slist_free_full (streams, gst_object_unref);
+}
+
 
 /* thread reading messages from libtorrent */
 static gboolean
@@ -682,13 +743,6 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           if (stream->buffering) {
             gst_bt_demux_stream_update_buffering (stream, h, thiz->buffer_pieces);
             update_buffering = TRUE;
-
-            if (stream->buffering_level == 100) {
-              GST_DEBUG_OBJECT (thiz, "Buffering finished, reading piece %d"
-                  ", current: %d", stream->current_piece + 1,
-                  stream->current_piece);
-              h.read_piece (stream->current_piece + 1);
-            }
           }
 
           /* download the next piece */
@@ -696,7 +750,7 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
               thiz->buffer_pieces);
 
           if (update_buffering)
-            gst_bt_demux_send_buffering (thiz);
+            gst_bt_demux_send_buffering (thiz, h);
         }
         break;
       }
@@ -802,7 +856,7 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
         if (topology_changed)
           gst_bt_demux_check_no_more_pads (thiz);
         if (update_buffering)
-          gst_bt_demux_send_buffering (thiz);
+          gst_bt_demux_send_buffering (thiz, h);
       }
       break;
 
