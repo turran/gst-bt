@@ -44,12 +44,14 @@ typedef struct _GstBtDemuxStream
   gint start_piece;
   gint end_offset;
   gint end_piece;
-  gint blocks;
 
   gboolean requested;
   gboolean finished;
   gboolean buffering;
   gint buffering_level;
+  gint needed_buffering_blocks;
+  gint blocks;
+
   gint downloading_pieces;
 } GstBtDemuxStream;
 
@@ -73,7 +75,6 @@ typedef struct _GstBtDemux
   gint buffer_pieces;
 
   gpointer session;
-  gint block_size;
 
   GstTask *task;
   GStaticRecMutex task_lock;
