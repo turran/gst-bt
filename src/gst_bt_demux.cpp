@@ -153,6 +153,37 @@ gst_bt_demux_stream_add_piece (GstBtDemuxStream * thiz,
   }
 }
 
+static gboolean
+gst_bt_demux_stream_activate (GstBtDemuxStream * thiz,
+    libtorrent::torrent_handle h, int at_piece, int max_pieces)
+{
+  gboolean ret = FALSE;
+
+  GST_DEBUG_OBJECT (thiz, "Activating stream '%s'", GST_PAD_NAME (thiz));
+  if (h.have_piece (at_piece)) {
+    /* request the first non-downloaded piece */
+    if (at_piece != thiz->end_piece) {
+      int i;
+
+      for (i = 1; i < max_pieces; i++) {
+        gst_bt_demux_stream_add_piece (thiz, h, at_piece + i,
+            max_pieces);
+      }
+    }
+
+  } else {
+    int i;
+
+    for (i = 0; i < max_pieces; i++) {
+      gst_bt_demux_stream_add_piece (thiz, h, at_piece + i,
+          max_pieces);
+    }
+    /* start the buffering */
+    gst_bt_demux_stream_start_buffering (thiz, h, max_pieces);
+    ret = TRUE;
+  }
+  return ret;
+}
 
 static gboolean
 gst_bt_demux_stream_event (GstPad * pad, GstEvent * event)
@@ -179,11 +210,13 @@ gst_bt_demux_stream_event (GstPad * pad, GstEvent * event)
           break;
 
         GST_ERROR ("seek format %d %lld %lld", format, start, stop);
+        /* update the stream segment */
+        /* get the piece that matches such segment start */
+        /* activate again this stream */
+        /* send the buffering if we need to */
         break;
       }
   }
-
-  ret = TRUE;
 
   gst_object_unref (thiz);
 
@@ -199,8 +232,6 @@ gst_bt_demux_stream_query (GstPad * pad, GstQuery * query)
   thiz = GST_BT_DEMUX (gst_pad_get_parent (pad));
   
   GST_DEBUG_OBJECT (thiz, "Quering %s", GST_QUERY_TYPE_NAME (query));
-
-  ret = TRUE;
 
   gst_object_unref (thiz);
 
@@ -585,29 +616,8 @@ gst_bt_demux_activate_streams (GstBtDemux * thiz)
     stream->requested = TRUE;
 
     GST_DEBUG_OBJECT (thiz, "Requesting stream %s", GST_PAD_NAME (stream));
-
-    if (h.have_piece (stream->start_piece)) {
-      /* request the first non-downloaded piece */
-      if (stream->start_piece != stream->end_piece) {
-        int i;
-
-        for (i = 1; i < thiz->buffer_pieces; i++) {
-          gst_bt_demux_stream_add_piece (stream, h, stream->start_piece + i,
-              thiz->buffer_pieces);
-        }
-      }
-
-    } else {
-      int i;
-
-      for (i = 0; i < thiz->buffer_pieces; i++) {
-        gst_bt_demux_stream_add_piece (stream, h, stream->start_piece + i,
-            thiz->buffer_pieces);
-      }
-      /* start the buffering */
-      gst_bt_demux_stream_start_buffering (stream, h, thiz->buffer_pieces);
-      update_buffering = TRUE;
-    }
+    update_buffering |= gst_bt_demux_stream_activate (stream, h,
+        stream->start_piece, thiz->buffer_pieces);
   }
 
   /* wait for the buffering before reading pieces */
