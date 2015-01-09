@@ -39,6 +39,8 @@ typedef enum _GstBtDemuxSelectorPolicy {
 typedef struct _GstBtDemuxStream
 {
   GstPad pad;
+  gint idx;
+
   gint current_piece;
   gint start_offset;
   gint start_piece;

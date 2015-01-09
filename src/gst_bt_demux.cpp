@@ -185,24 +185,52 @@ gst_bt_demux_stream_activate (GstBtDemuxStream * thiz,
   return ret;
 }
 
+static void
+gst_bt_demux_stream_info (GstBtDemuxStream * thiz,
+    libtorrent::torrent_handle h, gint * start_offset,
+    gint * start_piece, gint * end_offset, gint * end_piece)
+{
+  using namespace libtorrent;
+  file_entry fe;
+  int piece_length;
+  torrent_info ti = h.get_torrent_info ();
+
+  piece_length = ti.piece_length ();
+  fe = ti.file_at (thiz->idx);
+  *start_piece = fe.offset / piece_length;
+  *start_offset = fe.offset % piece_length;
+  *end_piece = (fe.offset + fe.size) /piece_length;
+  *end_offset = (fe.offset + fe.size) % piece_length;
+}
+
 static gboolean
 gst_bt_demux_stream_event (GstPad * pad, GstEvent * event)
 {
-  GstBtDemux *thiz;
+  using namespace libtorrent;
+  GstBtDemuxStream *thiz;
   gboolean ret = FALSE;
 
-  thiz = GST_BT_DEMUX (gst_pad_get_parent (pad));
+  thiz = GST_BT_DEMUX_STREAM (pad);
 
   GST_DEBUG_OBJECT (thiz, "Event %s", GST_EVENT_TYPE_NAME (event));
 
   switch (GST_EVENT_TYPE (event)) {
     case GST_EVENT_SEEK:
       {
+        GstBtDemux *demux;
         GstFormat format;
         GstSeekFlags flags;
         GstSeekType start_type, stop_type;
         gint64 start, stop;
         gdouble rate;
+        gint start_piece, start_offset, end_piece, end_offset;
+        torrent_handle h;
+        session *s;
+
+        demux = GST_BT_DEMUX (gst_pad_get_parent (pad));
+        s = (session *)demux->session;
+        h = s->get_torrents ()[0];
+        gst_object_unref (demux);
 
         gst_event_parse_seek (event, &rate, &format, &flags, &start_type,
             &start, &stop_type, &stop);
@@ -210,15 +238,16 @@ gst_bt_demux_stream_event (GstPad * pad, GstEvent * event)
           break;
 
         GST_ERROR ("seek format %d %lld %lld", format, start, stop);
-        /* update the stream segment */
-        /* get the piece that matches such segment start */
-        /* activate again this stream */
-        /* send the buffering if we need to */
+        gst_bt_demux_stream_info (thiz, h, &start_offset,
+            &start_piece, &end_offset, &end_piece);
+
+        /* TODO update the stream segment: */
+        /* TODO get the piece that matches such segment start */
+        /* TODO activate again this stream */
+        /* TODO send the buffering if we need to */
         break;
       }
   }
-
-  gst_object_unref (thiz);
 
   return ret;
 }
@@ -226,14 +255,12 @@ gst_bt_demux_stream_event (GstPad * pad, GstEvent * event)
 static gboolean
 gst_bt_demux_stream_query (GstPad * pad, GstQuery * query)
 {
-  GstBtDemux *thiz;
+  GstBtDemuxStream *thiz;
   gboolean ret = FALSE;
 
-  thiz = GST_BT_DEMUX (gst_pad_get_parent (pad));
-  
-  GST_DEBUG_OBJECT (thiz, "Quering %s", GST_QUERY_TYPE_NAME (query));
+  thiz = GST_BT_DEMUX_STREAM (pad);
 
-  gst_object_unref (thiz);
+  GST_DEBUG_OBJECT (thiz, "Quering %s", GST_QUERY_TYPE_NAME (query));
 
   return ret;
 }
@@ -674,7 +701,6 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             GstBtDemuxStream *stream;
             gchar *name;
             file_entry fe;
-            int piece_length;
 
             /* create the pads */
             name = g_strdup_printf ("src_%02d", i);
@@ -685,14 +711,14 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
                 GST_PAD_SRC, "template", gst_static_pad_template_get (&src_factory), NULL);
             g_free (name);
 
-            /* get the pieces and offsets related to the file */
-            piece_length = p->params.ti->piece_length ();
-            fe = p->params.ti->file_at (i);
-            stream->start_piece = fe.offset / piece_length;
-            stream->start_offset = fe.offset % piece_length;
-            stream->end_piece = (fe.offset + fe.size) /piece_length;
-            stream->end_offset = (fe.offset + fe.size) % piece_length;
+            /* set the idx */
+            stream->idx = i;
 
+            /* get the pieces and offsets related to the file */
+            gst_bt_demux_stream_info (stream, h, &stream->start_offset,
+                &stream->start_piece, &stream->end_offset, &stream->end_piece);
+
+            fe =  p->params.ti->file_at (i);
             GST_DEBUG_OBJECT (thiz, "Adding stream %s for file '%s', "
                 " start_piece: %d, start_offset: %d, end_piece: %d, "
                 "end_offset: %d", GST_PAD_NAME (stream), fe.path.c_str (),
