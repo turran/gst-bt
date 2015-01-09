@@ -1,3 +1,13 @@
+/*
+ * TODO:
+ * + Implement queries:
+ *   duration
+ *   buffering level
+ *   position
+ * + Implement events:
+ *   seek
+ */
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -53,29 +63,60 @@ gst_bt_demux_selector_policy_get_type (void)
 G_DEFINE_TYPE (GstBtDemuxStream, gst_bt_demux_stream, GST_TYPE_PAD);
 
 static void
-gst_bt_demux_stream_setup_buffering (GstBtDemuxStream * thiz,
-    libtorrent::torrent_handle h, int piece, int max_pieces)
+gst_bt_demux_stream_start_buffering (GstBtDemuxStream * thiz,
+    libtorrent::torrent_handle h, int max_pieces)
 {
   using namespace libtorrent;
   int i;
-  int end = piece + max_pieces;
+  int start = thiz->current_piece + 1;
+  int end = thiz->current_piece + max_pieces;
 
-  /* calculate the buffering block of this stream */
-  GST_ERROR ("Start buffering");
-  thiz->needed_buffering_blocks = 0;
-  for (i = piece; i < thiz->end_piece && i < end; i++) {
-    int piece_size;
-    int block_count;
+  /* do not overflow */
+  if (end > thiz->end_piece)
+    end = thiz->end_piece;
 
-    piece_size = h.get_torrent_info ().piece_size (i);
-    block_count = piece_size / h.status ().block_size;
+  /* count how many consecutive pieces need to be downloaded */
+  thiz->buffering_count = 0;
+  for (i = start; i <= end; i++) {
 
-    thiz->needed_buffering_blocks += block_count;
+    /* already downloaded */
+    if (h.have_piece (i))
+      continue;
+
+    thiz->buffering_count++;
   }
 
   thiz->buffering = TRUE;
-  thiz->blocks = 0;
   thiz->buffering_level = 0;
+}
+
+static void
+gst_bt_demux_stream_update_buffering (GstBtDemuxStream * thiz,
+    libtorrent::torrent_handle h, int max_pieces)
+{
+  using namespace libtorrent;
+  int i;
+  int start = thiz->current_piece + 1;
+  int end = thiz->current_piece + max_pieces;
+  int buffered_pieces = 0;
+
+  /* do not overflow */
+  if (end > thiz->end_piece)
+    end = thiz->end_piece;
+
+  /* count how many consecutive pieces have been downloaded */
+  for (i = start; i <= end; i++) {
+    if (h.have_piece (i))
+      buffered_pieces++;
+  }
+
+  if (buffered_pieces > thiz->buffering_count)
+    buffered_pieces = thiz->buffering_count;
+
+  thiz->buffering = TRUE;
+  thiz->buffering_level = (buffered_pieces * 100) / thiz->buffering_count;
+  GST_DEBUG_OBJECT (thiz, "Buffering level %d (%d/%d)", thiz->buffering_level,
+      buffered_pieces, thiz->buffering_count);
 }
 
 static void
@@ -83,11 +124,10 @@ gst_bt_demux_stream_add_piece (GstBtDemuxStream * thiz,
     libtorrent::torrent_handle h, int piece, int max_pieces)
 {
   using namespace libtorrent;
-  int i = thiz->downloading_pieces;
 
-  GST_DEBUG_OBJECT (thiz, "Adding more pieces, current_downloading: %d, "
-      "max: %d", i, max_pieces);
-  for (piece; piece < thiz->end_piece && i < max_pieces; piece++) {
+  GST_DEBUG_OBJECT (thiz, "Adding more pieces at %d, current: %d, "
+      "max: %d", piece, thiz->current_piece, max_pieces);
+  for (piece; piece < thiz->end_piece; piece++) {
     int priority;
 
     if (h.have_piece (piece))
@@ -102,11 +142,9 @@ gst_bt_demux_stream_add_piece (GstBtDemuxStream * thiz,
     priority = 7;
 
     h.piece_priority (piece, priority);
-    thiz->downloading_pieces++;
-    GST_DEBUG_OBJECT (thiz, "Requesting piece %d, prio: %d, current: %d, "
-        "downloading: %d", piece, priority, thiz->current_piece,
-        thiz->downloading_pieces);
-    i++;
+    GST_DEBUG_OBJECT (thiz, "Requesting piece %d, prio: %d, current: %d, ",
+        piece, priority, thiz->current_piece);
+    break;
   }
 }
 
@@ -441,16 +479,24 @@ gst_bt_demux_activate_streams (GstBtDemux * thiz)
     if (h.have_piece (stream->start_piece)) {
       /* request the first non-downloaded piece */
       if (stream->start_piece != stream->end_piece) {
-        gst_bt_demux_stream_add_piece (stream, h, stream->start_piece,
-          thiz->buffer_pieces);
+        int i;
+
+        for (i = 0; i < thiz->buffer_pieces; i++) {
+          gst_bt_demux_stream_add_piece (stream, h, stream->start_piece + i,
+              thiz->buffer_pieces);
+        }
       }
 
       GST_DEBUG_OBJECT (thiz, "Reading piece %d, current: %d",
           stream->start_piece, stream->current_piece);
       h.read_piece (stream->start_piece);
     } else {
-      gst_bt_demux_stream_add_piece (stream, h, stream->start_piece,
-          thiz->buffer_pieces);
+      int i;
+
+      for (i = 0; i < thiz->buffer_pieces; i++) {
+        gst_bt_demux_stream_add_piece (stream, h, stream->start_piece + i,
+            thiz->buffer_pieces);
+      }
     }
   }
 
@@ -498,10 +544,10 @@ gst_bt_demux_send_buffering (GstBtDemux * thiz)
       continue;
     if (!stream->buffering)
       continue;
+
     buffering += stream->buffering_level;
     /* unset the stream buffering */
     if (stream->buffering_level == 100) {
-      GST_ERROR ("End buffering");
       stream->buffering = FALSE;
       stream->buffering_level = 0;
     }
@@ -614,7 +660,6 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
         torrent_handle h = p->handle;
         torrent_status s = h.status();
         gboolean update_buffering = FALSE;
-        gboolean download_more = TRUE;
 
         GST_DEBUG_OBJECT (thiz, "Piece %d completed (down: %d kb/s, "
             "up: %d kb/s, peers: %d)", p->piece_index, s.download_rate / 1000,
@@ -633,99 +678,28 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           /* low the priority again */
           h.piece_priority (p->piece_index, 0);
 
-          /* decrement the number of downloading pieces */
-          stream->downloading_pieces--;
-
-          /* finish the buffering */
+          /* update the buffering */
           if (stream->buffering) {
+            gst_bt_demux_stream_update_buffering (stream, h, thiz->buffer_pieces);
+            update_buffering = TRUE;
 
-              /* TODO update the buffer level */
-              if (!stream->downloading_pieces) {
-                stream->blocks = 0;
-                stream->buffering_level = 100;
-                update_buffering = TRUE;
-
-                GST_DEBUG_OBJECT (thiz, "Reading piece %d, current: %d",
-                    p->piece_index, stream->current_piece);
-                h.read_piece (stream->current_piece + 1);
-              } else {
-                /* do not download more until we reach the 100% of buffering */
-                download_more = FALSE;
-              }
+            if (stream->buffering_level == 100) {
+              GST_DEBUG_OBJECT (thiz, "Buffering finished, reading piece %d"
+                  ", current: %d", stream->current_piece + 1,
+                  stream->current_piece);
+              h.read_piece (stream->current_piece + 1);
+            }
           }
 
-          if (download_more) {
-            /* download the next pieces */
-            gst_bt_demux_stream_add_piece (stream, h, p->piece_index + 1,
-                thiz->buffer_pieces);
-          }
+          /* download the next piece */
+          gst_bt_demux_stream_add_piece (stream, h, p->piece_index + 1,
+              thiz->buffer_pieces);
 
           if (update_buffering)
             gst_bt_demux_send_buffering (thiz);
         }
         break;
       }
-    case block_downloading_alert::alert_type:
-      {
-        GSList *walk;
-        block_downloading_alert *p = alert_cast<block_downloading_alert>(a);
-        torrent_handle h = p->handle;
-
-        for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
-          GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
-
-          if (p->piece_index < stream->start_piece &&
-              p->piece_index > stream->end_piece)
-            continue;
-
-          if (!stream->requested)
-            continue;
-
-          if (stream->buffering)
-            continue;
-
-          /* time to mark the stream as buffering with 0% */
-          if (stream->current_piece + 1 == p->piece_index) {
-            gst_bt_demux_stream_setup_buffering (stream, h, p->piece_index,
-                thiz->buffer_pieces);
-          }
-        }
-        gst_bt_demux_send_buffering (thiz);
-        break;
-      }
-    case block_finished_alert::alert_type:
-      {
-        GSList *walk;
-        block_finished_alert *p = alert_cast<block_finished_alert>(a);
-        torrent_handle h = p->handle;
-
-        for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
-          GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
-
-          if (p->piece_index < stream->start_piece &&
-              p->piece_index > stream->end_piece)
-            continue;
-
-          if (!stream->requested)
-            continue;
-
-          if (!stream->buffering)
-            continue;
-
-          /* in case this block belongs to the pieces we are waiting for,
-           * update the buffering level
-           */
-          if (p->piece_index > stream->current_piece + 1 && p->piece_index <
-              stream->current_piece + thiz->buffer_pieces) {
-
-            stream->blocks++;
-            stream->buffering_level = (stream->blocks * 100) / stream->needed_buffering_blocks;
-          }
-        }
-        gst_bt_demux_send_buffering (thiz);
-        break;
-      }
-
     case read_piece_alert::alert_type:
       {
         GstFlowReturn ret;
@@ -771,14 +745,16 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           /* read the next piece */
           if (p->piece + 1 <= stream->end_piece) {
             if (h.have_piece (p->piece + 1)) {
-              GST_DEBUG_OBJECT (thiz, "Reading piece %d, current: %d",
+              GST_DEBUG_OBJECT (thiz, "Reading next piece %d, current: %d",
                   p->piece + 1, stream->current_piece);
               h.read_piece (p->piece + 1);
             } else {
               int i;
 
-              /* calculate the buffering block of this stream */
-              gst_bt_demux_stream_setup_buffering (stream, h, p->piece + 1,
+              GST_DEBUG_OBJECT (thiz, "Start buffering next piece %d",
+                  p->piece + 1);
+              /* start buffering now that the piece is not available */
+              gst_bt_demux_stream_start_buffering (stream, h,
                   thiz->buffer_pieces);
               update_buffering = TRUE;
             }
@@ -805,8 +781,8 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           }
 
 
-          GST_DEBUG_OBJECT (thiz, "Pushing buffer of size %d on file %d",
-              GST_BUFFER_SIZE (buf), i);
+          GST_DEBUG_OBJECT (thiz, "Pushing buffer, size: %d, file: %d, piece: %d",
+              GST_BUFFER_SIZE (buf), i, p->piece);
           ret = gst_pad_push (GST_PAD (stream), buf);
 
           /* send the EOS downstream */
