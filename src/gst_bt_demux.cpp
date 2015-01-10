@@ -226,23 +226,64 @@ gst_bt_demux_stream_event (GstPad * pad, GstEvent * event)
         gint start_piece, start_offset, end_piece, end_offset;
         torrent_handle h;
         session *s;
+        int i;
+        int bytes = 0;
+        int piece_length;
 
         demux = GST_BT_DEMUX (gst_pad_get_parent (pad));
         s = (session *)demux->session;
         h = s->get_torrents ()[0];
         gst_object_unref (demux);
 
+        /* get the piece length */
+        torrent_info ti = h.get_torrent_info ();
+        piece_length = ti.piece_length ();
+
         gst_event_parse_seek (event, &rate, &format, &flags, &start_type,
             &start, &stop_type, &stop);
+        /* sanitize stuff */
         if (format != GST_FORMAT_BYTES)
           break;
 
-        GST_ERROR ("seek format %d %lld %lld", format, start, stop);
+        if (rate < 0.0)
+          break;
+
         gst_bt_demux_stream_info (thiz, h, &start_offset,
             &start_piece, &end_offset, &end_piece);
 
+        if (start < 0)
+          start = 0;
+
+        if (stop < 0)
+          stop = ((end_piece - 1) * piece_length) + end_offset;
+
+        GST_ERROR ("seek format %d %lld %lld", format, start, stop);
+
         /* TODO update the stream segment: */
         /* TODO get the piece that matches such segment start */
+
+        for (i = start_piece; i <= end_piece; i++) {
+          int start_bytes = bytes;
+          int end_bytes;
+
+          if (i == start_piece) {
+            end_bytes = bytes + (piece_length - start_offset);
+          } else if (i == end_piece) {
+            end_bytes = bytes + end_offset;
+          } else {
+            end_bytes = bytes + piece_length;
+          }
+
+          if (start > start_bytes && start <= end_bytes) {
+            GST_ERROR ("start is at piece %d", i);
+          }
+
+          if (stop > start_bytes && stop <= end_bytes) {
+            GST_ERROR ("end is at piece %d", i);
+          }
+
+          bytes = end_bytes;
+        }
         /* TODO activate again this stream */
         /* TODO send the buffering if we need to */
         break;
