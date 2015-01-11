@@ -47,6 +47,10 @@ typedef struct _GstBtDemuxStream
   gint end_offset;
   gint end_piece;
 
+  gint64 start_byte;
+  gint64 end_byte;
+  gboolean pending_segment;
+
   gboolean requested;
   gboolean finished;
   gboolean buffering;
