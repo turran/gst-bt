@@ -920,8 +920,9 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             GstEvent *event;
 
             event = gst_event_new_new_segment (FALSE, 1.0, GST_FORMAT_BYTES,
-                stream->start_byte, stream->end_byte, -1);
+                stream->start_byte, stream->end_byte, stream->start_byte);
             gst_pad_push_event (GST_PAD (stream), event);
+            stream->pending_segment = FALSE;
           }
 
           buf = gst_buffer_new ();
