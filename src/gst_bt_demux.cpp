@@ -4,7 +4,6 @@
  *   duration
  *   buffering level
  *   position
- * + Implement events:
  *   seek
  */
 
@@ -251,6 +250,7 @@ gst_bt_demux_stream_seek (GstBtDemuxStream * thiz, GstEvent * event)
 
   gst_event_parse_seek (event, &rate, &format, &flags, &start_type,
       &start, &stop_type, &stop);
+
   /* sanitize stuff */
   if (format != GST_FORMAT_BYTES)
     goto beach;
@@ -283,6 +283,13 @@ gst_bt_demux_stream_seek (GstBtDemuxStream * thiz, GstEvent * event)
 
   g_mutex_lock (thiz->lock);
 
+  if (flags & GST_SEEK_FLAG_FLUSH) {
+    gst_pad_push_event (GST_PAD (thiz), gst_event_new_flush_start ());
+    gst_pad_push_event (GST_PAD (thiz), gst_event_new_flush_stop ());
+  } else {
+    /* TODO we need to close the segment */
+  }
+
   /* update the stream segment */
   thiz->start_byte = start;
   thiz->end_byte = stop,
@@ -294,8 +301,9 @@ gst_bt_demux_stream_seek (GstBtDemuxStream * thiz, GstEvent * event)
   thiz->start_piece = start_piece + ((start + start_offset) / piece_length);
   thiz->start_offset = tmp + ((start + start_offset) % piece_length);
 
-  GST_ERROR ("seeking to, start: %d, start_offset: %d, end: %d, end_offset: %d",
-      thiz->start_piece, thiz->start_offset, thiz->end_piece, thiz->end_offset);
+  GST_DEBUG_OBJECT (thiz, "Seeking to, start: %d, start_offset: %d, end: %d, "
+      "end_offset: %d", thiz->start_piece, thiz->start_offset,
+      thiz->end_piece, thiz->end_offset);
 
   /* activate again this stream */
   update_buffering = gst_bt_demux_stream_activate (thiz, h,
@@ -312,13 +320,13 @@ gst_bt_demux_stream_seek (GstBtDemuxStream * thiz, GstEvent * event)
 
   ret = TRUE;
 
-beach:
   g_mutex_unlock (thiz->lock);
 
   /* send the buffering if we need to */
   if (update_buffering)
     gst_bt_demux_send_buffering (demux, h);
 
+beach:
   return ret;
 }
 
@@ -670,6 +678,7 @@ gst_bt_demux_send_buffering (GstBtDemux * thiz, libtorrent::torrent_handle h)
       stream->buffering_level = 0;
     }
     num_buffering++;
+    g_mutex_unlock (stream->lock);
   }
 
   if (num_buffering) {
