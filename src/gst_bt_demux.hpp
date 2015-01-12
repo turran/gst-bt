@@ -102,6 +102,11 @@ typedef struct _GstBtDemux
 
   GstTask *task;
   GStaticRecMutex task_lock;
+
+  GstTask *push_task;
+  GStaticRecMutex push_task_lock;
+
+  GAsyncQueue *ipc;
 } GstBtDemux;
 
 typedef struct _GstBtDemuxClass

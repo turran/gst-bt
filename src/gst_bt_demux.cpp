@@ -47,6 +47,8 @@ gst_bt_demux_send_buffering (GstBtDemux * thiz, libtorrent::torrent_handle h);
 typedef struct _GstBtDemuxBufferData
 {
   boost::shared_array <char> buffer;
+  int piece;
+  int size;
 } GstBtDemuxBufferData;
 
 static void gst_bt_demux_buffer_data_free (gpointer data)
@@ -408,6 +410,28 @@ gst_bt_demux_stream_query (GstPad * pad, GstQuery * query)
         ret = TRUE;
       }
       break;
+
+    case GST_QUERY_BUFFERING:
+      {
+        GstFormat format;
+
+        gst_query_parse_buffering_range (query, &format, NULL, NULL, NULL);
+        if (format == GST_FORMAT_BYTES) {
+          GstBtDemux *demux;
+          session *s;
+          torrent_handle h;
+          std::vector<partial_piece_info> piece_info;
+
+          demux = GST_BT_DEMUX (gst_pad_get_parent (GST_PAD (thiz)));
+          s = (session *)demux->session;
+          h = s->get_torrents ()[0];
+          gst_object_unref (demux);
+
+          h.get_download_queue (piece_info);
+          ret = TRUE;
+        }
+        break;
+      }
 
     default:
       break;
@@ -976,133 +1000,16 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
       }
     case read_piece_alert::alert_type:
       {
-        GstFlowReturn ret;
-        GstBuffer *buf;
-        GstBtDemuxBufferData *buf_data;
-        GSList *walk;
+        GstBtDemuxBufferData *ipc_data;
         read_piece_alert *p = alert_cast<read_piece_alert>(a);
-        torrent_handle h = p->handle;
-        gboolean topology_changed = FALSE;
-        gboolean update_buffering = FALSE;
 
-        g_mutex_lock (thiz->streams_lock);
-        /* send the data downstream */
-        for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
-          GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
+        /* send the data to the other thread */
+        ipc_data = g_new0 (GstBtDemuxBufferData, 1);
+        ipc_data->buffer = p->buffer;
+        ipc_data->piece = p->piece;
+        ipc_data->size = p->size;
 
-          g_mutex_lock (stream->lock);
-          if (p->piece < stream->start_piece && p->piece > stream->end_piece) {
-            g_mutex_unlock (stream->lock);
-            continue;
-          }
-
-          /* in case the pad is active but not requested, disable it */
-          if (gst_pad_is_active (GST_PAD (stream)) && !stream->requested) {
-            topology_changed = TRUE;
-            gst_pad_set_active (GST_PAD (stream), FALSE);
-            gst_element_remove_pad (GST_ELEMENT (thiz), GST_PAD (stream));
-            g_mutex_unlock (stream->lock);
-            continue;
-          }
-
-          if (!stream->requested) {
-            g_mutex_unlock (stream->lock);
-            continue;
-          }
-
-          /* in case we are not expecting this buffer */
-          if (p->piece != stream->current_piece + 1) {
-            GST_DEBUG_OBJECT (thiz, "Dropping piece %d, waiting for %d on "
-                "file %d", p->piece, stream->current_piece + 1, stream->idx);
-            g_mutex_unlock (stream->lock);
-            continue;
-          }
-
-          /* create the pad if needed */
-          if (!gst_pad_is_active (GST_PAD (stream))) {
-            gst_pad_set_active (GST_PAD (stream), TRUE);
-            gst_element_add_pad (GST_ELEMENT (thiz), GST_PAD (
-                gst_object_ref (stream)));
-            topology_changed = TRUE;
-          }
-
-          GST_DEBUG_OBJECT (thiz, "Received piece %d of size %d on file %d",
-              p->piece, p->size, stream->idx);
-
-          /* read the next piece */
-          if (p->piece + 1 <= stream->end_piece) {
-            if (h.have_piece (p->piece + 1)) {
-              GST_DEBUG_OBJECT (thiz, "Reading next piece %d, current: %d",
-                  p->piece + 1, stream->current_piece);
-              h.read_piece (p->piece + 1);
-            } else {
-              int i;
-
-              GST_DEBUG_OBJECT (thiz, "Start buffering next piece %d",
-                  p->piece + 1);
-              /* start buffering now that the piece is not available */
-              gst_bt_demux_stream_start_buffering (stream, h,
-                  thiz->buffer_pieces);
-              update_buffering = TRUE;
-            }
-          }
-
-          if (stream->pending_segment) {
-            GstEvent *event;
-
-            event = gst_event_new_new_segment (FALSE, 1.0, GST_FORMAT_BYTES,
-                stream->start_byte, stream->end_byte, stream->start_byte);
-            gst_pad_push_event (GST_PAD (stream), event);
-            stream->pending_segment = FALSE;
-          }
-
-          buf = gst_buffer_new ();
-          GST_BUFFER_DATA (buf) = (guint8 *)p->buffer.get ();
-
-          buf_data = g_new0 (GstBtDemuxBufferData, 1);
-          buf_data->buffer = p->buffer;
-          GST_BUFFER_MALLOCDATA (buf) = (guint8 *)buf_data;
-          GST_BUFFER_FREE_FUNC (buf) = gst_bt_demux_buffer_data_free;
-
-          GST_BUFFER_SIZE (buf) = p->size;
-
-          /* handle the offsets */
-          if (p->piece == stream->start_piece) {
-            GST_BUFFER_DATA (buf) = GST_BUFFER_DATA (buf) + stream->start_offset;
-            GST_BUFFER_SIZE (buf) -= stream->start_offset;
-          }
-
-          if (p->piece == stream->end_piece) {
-            GST_BUFFER_SIZE (buf) -= GST_BUFFER_SIZE (buf) - stream->end_offset;
-          }
-
-
-          GST_DEBUG_OBJECT (thiz, "Pushing buffer, size: %d, file: %d, piece: %d",
-              GST_BUFFER_SIZE (buf), stream->idx, p->piece);
-          /* TODO handle the return value */
-          ret = gst_pad_push (GST_PAD (stream), buf);
-
-          /* send the EOS downstream */
-          if (p->piece == stream->end_piece) {
-            GstEvent *eos;
-
-            eos = gst_event_new_eos ();
-            GST_DEBUG_OBJECT (thiz, "Sending EOS on file %d", stream->idx);
-            gst_pad_push_event (GST_PAD (stream), eos);
-            stream->finished = TRUE;
-          }
-
-          /* keep track of the current piece */
-          stream->current_piece = p->piece;
-          g_mutex_unlock (stream->lock);
-        }
-
-        if (topology_changed)
-          gst_bt_demux_check_no_more_pads (thiz);
-        if (update_buffering)
-          gst_bt_demux_send_buffering (thiz, h);
-
-        g_mutex_unlock (thiz->streams_lock);
+        g_async_queue_push (thiz->ipc, ipc_data);
       }
       break;
 
@@ -1153,12 +1060,173 @@ gst_bt_demux_loop (gpointer user_data)
 }
 
 static void
+gst_bt_demux_push_loop (gpointer user_data)
+{
+  using namespace libtorrent;
+  GstBtDemux *thiz;
+  GstBtDemuxBufferData *ipc_data;
+  GSList *walk;
+  session *s;
+  torrent_handle h;
+  gboolean topology_changed = FALSE;
+  gboolean update_buffering = FALSE;
+  
+  thiz = GST_BT_DEMUX (user_data);
+  if (thiz->finished)
+    return;
+
+  ipc_data = (GstBtDemuxBufferData *)g_async_queue_pop (thiz->ipc);
+  if (!ipc_data)
+    return;
+
+  if (!ipc_data->size) {
+    gst_bt_demux_buffer_data_free (ipc_data);
+    return;
+  }
+
+  s = (session *)thiz->session;
+  h = s->get_torrents ()[0];
+
+  /* get the stream this buffer belongs to */
+  g_mutex_lock (thiz->streams_lock);
+  /* send the data downstream */
+  for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+    GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
+    GstBuffer *buf;
+    GstFlowReturn ret;
+    GstBtDemuxBufferData *buf_data;
+
+    g_mutex_lock (stream->lock);
+    if (ipc_data->piece < stream->start_piece && ipc_data->piece > stream->end_piece) {
+      g_mutex_unlock (stream->lock);
+      continue;
+    }
+
+    /* in case the pad is active but not requested, disable it */
+    if (gst_pad_is_active (GST_PAD (stream)) && !stream->requested) {
+      topology_changed = TRUE;
+      gst_pad_set_active (GST_PAD (stream), FALSE);
+      gst_element_remove_pad (GST_ELEMENT (thiz), GST_PAD (stream));
+      g_mutex_unlock (stream->lock);
+      continue;
+    }
+
+    if (!stream->requested) {
+      g_mutex_unlock (stream->lock);
+      continue;
+    }
+
+    /* in case we are not expecting this buffer */
+    if (ipc_data->piece != stream->current_piece + 1) {
+      GST_DEBUG_OBJECT (thiz, "Dropping piece %d, waiting for %d on "
+          "file %d", ipc_data->piece, stream->current_piece + 1, stream->idx);
+      g_mutex_unlock (stream->lock);
+      continue;
+    }
+
+    /* create the pad if needed */
+    if (!gst_pad_is_active (GST_PAD (stream))) {
+      gst_pad_set_active (GST_PAD (stream), TRUE);
+      gst_element_add_pad (GST_ELEMENT (thiz), GST_PAD (
+          gst_object_ref (stream)));
+      topology_changed = TRUE;
+    }
+
+    GST_DEBUG_OBJECT (thiz, "Received piece %d of size %d on file %d",
+        ipc_data->piece, ipc_data->size, stream->idx);
+
+    /* read the next piece */
+    if (ipc_data->piece + 1 <= stream->end_piece) {
+      if (h.have_piece (ipc_data->piece + 1)) {
+        GST_DEBUG_OBJECT (thiz, "Reading next piece %d, current: %d",
+            ipc_data->piece + 1, stream->current_piece);
+        h.read_piece (ipc_data->piece + 1);
+      } else {
+        int i;
+
+        GST_DEBUG_OBJECT (thiz, "Start buffering next piece %d",
+            ipc_data->piece + 1);
+        /* start buffering now that the piece is not available */
+        gst_bt_demux_stream_start_buffering (stream, h,
+            thiz->buffer_pieces);
+        update_buffering = TRUE;
+      }
+    }
+
+    if (stream->pending_segment) {
+      GstEvent *event;
+
+      event = gst_event_new_new_segment (FALSE, 1.0, GST_FORMAT_BYTES,
+          stream->start_byte, stream->end_byte, stream->start_byte);
+      gst_pad_push_event (GST_PAD (stream), event);
+      stream->pending_segment = FALSE;
+    }
+
+    buf = gst_buffer_new ();
+    GST_BUFFER_DATA (buf) = (guint8 *)ipc_data->buffer.get ();
+
+    buf_data = g_new0 (GstBtDemuxBufferData, 1);
+    buf_data->buffer = ipc_data->buffer;
+    GST_BUFFER_MALLOCDATA (buf) = (guint8 *)buf_data;
+    GST_BUFFER_FREE_FUNC (buf) = gst_bt_demux_buffer_data_free;
+
+    GST_BUFFER_SIZE (buf) = ipc_data->size;
+
+    /* handle the offsets */
+    if (ipc_data->piece == stream->start_piece) {
+      GST_BUFFER_DATA (buf) = GST_BUFFER_DATA (buf) + stream->start_offset;
+      GST_BUFFER_SIZE (buf) -= stream->start_offset;
+    }
+
+    if (ipc_data->piece == stream->end_piece) {
+      GST_BUFFER_SIZE (buf) -= GST_BUFFER_SIZE (buf) - stream->end_offset;
+    }
+
+
+    GST_DEBUG_OBJECT (thiz, "Pushing buffer, size: %d, file: %d, piece: %d",
+        GST_BUFFER_SIZE (buf), stream->idx, ipc_data->piece);
+    /* TODO handle the return value */
+    ret = gst_pad_push (GST_PAD (stream), buf);
+
+    /* send the EOS downstream */
+    if (ipc_data->piece == stream->end_piece) {
+      GstEvent *eos;
+
+      eos = gst_event_new_eos ();
+      GST_DEBUG_OBJECT (thiz, "Sending EOS on file %d", stream->idx);
+      gst_pad_push_event (GST_PAD (stream), eos);
+      stream->finished = TRUE;
+    }
+
+    /* keep track of the current piece */
+    stream->current_piece = ipc_data->piece;
+    g_mutex_unlock (stream->lock);
+  }
+
+  if (topology_changed)
+    gst_bt_demux_check_no_more_pads (thiz);
+  if (update_buffering)
+    gst_bt_demux_send_buffering (thiz, h);
+
+  g_mutex_unlock (thiz->streams_lock);
+  gst_bt_demux_buffer_data_free (ipc_data);
+}
+
+static void
 gst_bt_demux_task_setup (GstBtDemux * thiz)
 {
-   /* to pop from the libtorrent async system */
+  /* to pop from the libtorrent async system */
   thiz->task = gst_task_create (gst_bt_demux_loop, thiz);
   gst_task_set_lock (thiz->task, &thiz->task_lock);
   gst_task_start (thiz->task);
+
+  /* to push downstream */
+  thiz->push_task = gst_task_create (gst_bt_demux_push_loop, thiz);
+  gst_task_set_lock (thiz->push_task, &thiz->push_task_lock);
+  gst_task_start (thiz->push_task);
+
+  /* our ipc between tasks */
+  thiz->ipc = g_async_queue_new_full ((GDestroyNotify)gst_buffer_unref);
 }
 
 static void
@@ -1184,10 +1252,28 @@ gst_bt_demux_task_cleanup (GstBtDemux * thiz)
    * to ready state, we need to exit the task and wait for it
    */
   if (thiz->task) { 
-    gst_task_stop (thiz->task); 
+    gst_task_stop (thiz->task);
     gst_task_join (thiz->task);
     gst_object_unref (thiz->task);
     thiz->task = NULL;
+  }
+
+  if (thiz->push_task) {
+    GstBtDemuxBufferData *ipc_data;
+
+    /* send a cleanup buffer */
+    ipc_data = g_new0 (GstBtDemuxBufferData, 1);
+    g_async_queue_push (thiz->ipc, ipc_data);
+
+    gst_task_stop (thiz->push_task); 
+    gst_task_join (thiz->push_task);
+    gst_object_unref (thiz->push_task);
+    thiz->push_task = NULL;
+  }
+
+  if (thiz->ipc) {
+    g_async_queue_unref (thiz->ipc);
+    thiz->ipc = NULL;
   }
 }
 
@@ -1391,6 +1477,7 @@ gst_bt_demux_init (GstBtDemux * thiz)
   thiz->session = s;
 
   g_static_rec_mutex_init (&thiz->task_lock);
+  g_static_rec_mutex_init (&thiz->push_task_lock);
 
   /* default properties */
   thiz->policy = GST_BT_DEMUX_SELECTOR_POLICY_LARGER;
