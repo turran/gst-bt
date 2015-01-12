@@ -56,6 +56,8 @@ typedef struct _GstBtDemuxStream
   gboolean buffering;
   gint buffering_level;
   gint buffering_count;
+
+  GMutex *lock;
 } GstBtDemuxStream;
 
 typedef struct _GstBtDemuxStreamClass {
@@ -70,6 +72,7 @@ typedef struct _GstBtDemux
   GstAdapter *adapter;
 
   GstBtDemuxSelectorPolicy policy;
+  GMutex *streams_lock;
   GSList *streams;
   gchar *requested_streams;
 
