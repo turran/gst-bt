@@ -1,10 +1,8 @@
 /*
  * TODO:
  * + Implement queries:
- *   duration
  *   buffering level
  *   position
- *   seek
  */
 
 #ifdef HAVE_CONFIG_H
@@ -354,12 +352,48 @@ gst_bt_demux_stream_event (GstPad * pad, GstEvent * event)
 static gboolean
 gst_bt_demux_stream_query (GstPad * pad, GstQuery * query)
 {
+  using namespace libtorrent;
   GstBtDemuxStream *thiz;
   gboolean ret = FALSE;
 
   thiz = GST_BT_DEMUX_STREAM (pad);
 
   GST_DEBUG_OBJECT (thiz, "Quering %s", GST_QUERY_TYPE_NAME (query));
+
+  switch (GST_QUERY_TYPE (query)) {
+    case GST_QUERY_SEEKING:
+      {
+        GstFormat format;
+        gst_query_parse_seeking (query, &format, NULL, NULL, NULL);
+        if (format == GST_FORMAT_BYTES) {
+          gst_query_set_seeking (query, GST_FORMAT_BYTES, TRUE, 0, -1);
+          ret = TRUE;
+        }
+      }
+      break;
+
+    case GST_QUERY_DURATION:
+      {
+        GstBtDemux *demux;
+        session *s;
+        torrent_handle h;
+        gint64 bytes;
+
+        demux = GST_BT_DEMUX (gst_pad_get_parent (GST_PAD (thiz)));
+        s = (session *)demux->session;
+        h = s->get_torrents ()[0];
+        gst_object_unref (demux);
+
+        gst_bt_demux_stream_info (thiz, h, NULL, NULL, NULL, NULL, &bytes);
+        gst_query_set_duration (query, GST_FORMAT_BYTES, bytes);
+
+        ret = TRUE;
+      }
+      break;
+
+    default:
+      break;
+  }
 
   return ret;
 }
