@@ -420,14 +420,22 @@ gst_bt_demux_stream_query (GstPad * pad, GstQuery * query)
           GstBtDemux *demux;
           session *s;
           torrent_handle h;
-          std::vector<partial_piece_info> piece_info;
+          std::vector<partial_piece_info> pi;
 
           demux = GST_BT_DEMUX (gst_pad_get_parent (GST_PAD (thiz)));
           s = (session *)demux->session;
           h = s->get_torrents ()[0];
           gst_object_unref (demux);
 
-          h.get_download_queue (piece_info);
+          h.get_download_queue (pi);
+          for (std::vector<partial_piece_info>::iterator it = pi.begin();
+              it != pi.end(); ++it) {
+
+            /* all the piece is finished */
+            if (it->finished == it->blocks_in_piece) {
+              // gst_query_add_buffering_range (query, pi...);
+            }
+          }
           ret = TRUE;
         }
         break;
