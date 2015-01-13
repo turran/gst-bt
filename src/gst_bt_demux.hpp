@@ -93,6 +93,9 @@ typedef struct _GstBtDemux
   GMutex *streams_lock;
   GSList *streams;
   gchar *requested_streams;
+  gboolean typefind;
+  gchar *temp_location;
+  gboolean temp_remove;
 
   gboolean finished;
   gboolean buffering;

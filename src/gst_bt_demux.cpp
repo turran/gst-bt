@@ -37,6 +37,11 @@
 #include "libtorrent/alert_types.hpp"
 #include "libtorrent/time.hpp"
 
+#define DEFAULT_TYPEFIND TRUE
+#define DEFAULT_BUFFER_PIECES 3
+#define DEFAULT_DIR "btdemux"
+#define DEFAULT_TEMP_REMOVE TRUE
+
 GST_DEBUG_CATEGORY_EXTERN (gst_bt_demux_debug);
 #define GST_CAT_DEFAULT gst_bt_demux_debug
 
@@ -492,10 +497,11 @@ gst_bt_demux_stream_init (GstBtDemuxStream * thiz)
 enum {
   PROP_0,
   PROP_SELECTOR_POLICY,
+  PROP_TYPEFIND,
   PROP_N_STREAMS,
   PROP_CURRENT_STREAM,
-  PROP_TMP_LOCATION,
-  PROP_TMP_REMOVE,
+  PROP_TEMP_LOCATION,
+  PROP_TEMP_REMOVE,
 };
 
 enum
@@ -568,6 +574,7 @@ gst_bt_demux_sink_event (GstPad * pad, GstEvent * event)
     libtorrent::add_torrent_params tp;
 
     tp.ti = torrent_info;
+    tp.save_path = thiz->temp_location;
 
     session = (libtorrent::session *)thiz->session;
     session->async_add_torrent (tp);
@@ -1154,15 +1161,15 @@ gst_bt_demux_push_loop (gpointer user_data)
 
     /* create the pad if needed */
     if (!gst_pad_is_active (GST_PAD (stream))) {
-      GstTypeFindProbability prob;
-      GstCaps *caps;
+      if (thiz->typefind) {
+        GstTypeFindProbability prob;
+        GstCaps *caps;
 
-      /* TODO make this configurable liek filesrc */
-      caps = gst_type_find_helper_for_buffer (GST_OBJECT (thiz), buf, &prob);
-      if (caps) {
-        gst_pad_set_caps (GST_PAD (stream), caps);
+        caps = gst_type_find_helper_for_buffer (GST_OBJECT (thiz), buf, &prob);
+        if (caps) {
+          gst_pad_set_caps (GST_PAD (stream), caps);
+        }
       }
-      GST_ERROR ("caps should be %" GST_PTR_FORMAT, caps);
       gst_pad_set_active (GST_PAD (stream), TRUE);
       gst_element_add_pad (GST_ELEMENT (thiz), GST_PAD (
           gst_object_ref (stream)));
@@ -1369,6 +1376,13 @@ gst_bt_demux_dispose (GObject * object)
 
   g_mutex_free (thiz->streams_lock);
 
+  g_free (thiz->temp_location);
+
+  /* finally remove the files if we need to */
+  if (thiz->temp_remove) {
+    GST_ERROR ("TODO we need to remove the files");
+  }
+
   G_OBJECT_CLASS (gst_bt_demux_parent_class)->dispose (object);
 }
 
@@ -1383,6 +1397,23 @@ gst_bt_demux_set_property (GObject * object, guint prop_id,
   thiz = GST_BT_DEMUX (object);
 
   switch (prop_id) {
+    case PROP_SELECTOR_POLICY:
+      thiz->policy = (GstBtDemuxSelectorPolicy)g_value_get_enum (value);
+      break;
+
+    case PROP_TYPEFIND:
+      thiz->typefind = g_value_get_boolean (value);
+      break;
+
+    case PROP_TEMP_REMOVE:
+      thiz->temp_remove = g_value_get_boolean (value);
+      break;
+
+    case PROP_TEMP_LOCATION:
+      g_free (thiz->temp_location);
+      thiz->temp_location = g_strdup (g_value_get_string (value));
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -1405,6 +1436,18 @@ gst_bt_demux_get_property (GObject * object, guint prop_id, GValue * value,
 
     case PROP_SELECTOR_POLICY:
       g_value_set_enum (value, thiz->policy);
+      break;
+
+    case PROP_TYPEFIND:
+      g_value_set_boolean (value, thiz->typefind);
+      break;
+
+    case PROP_TEMP_REMOVE:
+      g_value_set_boolean (value, thiz->temp_remove);
+      break;
+
+    case PROP_TEMP_LOCATION:
+      g_value_set_string (value, thiz->temp_location);
       break;
 
     default:
@@ -1437,6 +1480,18 @@ gst_bt_demux_class_init (GstBtDemuxClass * klass)
           "Specifies the automatic stream selector policy when no stream is "
           "selected", gst_bt_demux_selector_policy_get_type(),
           0, (GParamFlags)G_PARAM_READWRITE));
+  g_object_class_install_property (gobject_class, PROP_TYPEFIND,
+      g_param_spec_boolean ("typefind", "Typefind",
+          "Run typefind before negotiating", DEFAULT_TYPEFIND,
+          (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+  g_object_class_install_property (gobject_class, PROP_TEMP_LOCATION,
+      g_param_spec_string ("temp-location", "Temporary File Location",
+          "Location to store temporary files in", NULL,
+          (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+  g_object_class_install_property (gobject_class, PROP_TEMP_REMOVE,
+      g_param_spec_boolean ("temp-remove", "Remove temporary files",
+          "Remove temporary files", DEFAULT_TEMP_REMOVE,
+          (GParamFlags)(G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
   gst_bt_demux_signals[SIGNAL_STREAMS_CHANGED] =
       g_signal_new ("streams-changed", G_TYPE_FROM_CLASS (klass),
@@ -1498,5 +1553,9 @@ gst_bt_demux_init (GstBtDemux * thiz)
 
   /* default properties */
   thiz->policy = GST_BT_DEMUX_SELECTOR_POLICY_LARGER;
-  thiz->buffer_pieces = 3;
+  thiz->buffer_pieces = DEFAULT_BUFFER_PIECES;
+  thiz->typefind = DEFAULT_TYPEFIND;
+  thiz->temp_location = g_build_path (G_DIR_SEPARATOR_S, g_get_tmp_dir (), DEFAULT_DIR,
+      NULL);
+  thiz->temp_remove = DEFAULT_TEMP_REMOVE;
 }
