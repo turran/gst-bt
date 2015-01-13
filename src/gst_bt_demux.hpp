@@ -58,6 +58,7 @@ typedef struct _GstBtDemuxStream
 {
   GstPad pad;
   gint idx;
+  gchar *path;
 
   gint current_piece;
   gint start_offset;

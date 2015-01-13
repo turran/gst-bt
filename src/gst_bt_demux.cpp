@@ -29,6 +29,9 @@
 
 #include "gst_bt_demux.hpp"
 #include <gst/base/gsttypefindhelper.h>
+
+#include <glib/gstdio.h>
+
 #include <iterator>
 #include <deque>
 
@@ -460,6 +463,9 @@ gst_bt_demux_stream_dispose (GObject * object)
 
   thiz = GST_BT_DEMUX_STREAM (object);
 
+  if (thiz->path) {
+    g_free (thiz->path);
+  }
   g_mutex_free (thiz->lock);
 
   GST_DEBUG_OBJECT (thiz, "Disposing");
@@ -925,16 +931,19 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             /* set the idx */
             stream->idx = i;
 
+            /* set the path */
+            fe =  p->params.ti->file_at (i);
+            stream->path = g_strdup (fe.path.c_str ());
+
             /* get the pieces and offsets related to the file */
             stream->start_byte = 0;
             gst_bt_demux_stream_info (stream, h, &stream->start_offset,
                 &stream->start_piece, &stream->end_offset, &stream->end_piece,
                 &stream->end_byte);
 
-            fe =  p->params.ti->file_at (i);
-            GST_DEBUG_OBJECT (thiz, "Adding stream %s for file '%s', "
+            GST_INFO_OBJECT (thiz, "Adding stream %s for file '%s', "
                 " start_piece: %d, start_offset: %d, end_piece: %d, "
-                "end_offset: %d", GST_PAD_NAME (stream), fe.path.c_str (),
+                "end_offset: %d", GST_PAD_NAME (stream), stream->path,
                 stream->start_piece, stream->start_offset, stream->end_piece,
                 stream->end_offset);
 
@@ -1306,6 +1315,21 @@ gst_bt_demux_cleanup (GstBtDemux * thiz)
 {
   /* remove every pad reference */
   if (thiz->streams) {
+    /* finally remove the files if we need to */
+    if (thiz->temp_remove) {
+      GSList *walk;
+
+      for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+        GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
+        gchar *to_remove;
+
+        to_remove = g_build_path (G_DIR_SEPARATOR_S, thiz->temp_location,
+            stream->path, NULL);
+        g_remove (to_remove);
+        g_free (to_remove);
+      }
+    }
+
     g_slist_free_full (thiz->streams, gst_object_unref);
     thiz->streams = NULL;
   }
@@ -1377,11 +1401,6 @@ gst_bt_demux_dispose (GObject * object)
   g_mutex_free (thiz->streams_lock);
 
   g_free (thiz->temp_location);
-
-  /* finally remove the files if we need to */
-  if (thiz->temp_remove) {
-    GST_ERROR ("TODO we need to remove the files");
-  }
 
   G_OBJECT_CLASS (gst_bt_demux_parent_class)->dispose (object);
 }
