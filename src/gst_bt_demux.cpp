@@ -153,7 +153,7 @@ gst_bt_demux_stream_add_piece (GstBtDemuxStream * thiz,
 
   GST_DEBUG_OBJECT (thiz, "Adding more pieces at %d, current: %d, "
       "max: %d", piece, thiz->current_piece, max_pieces);
-  for (piece; piece < thiz->end_piece; piece++) {
+  for (piece; piece <= thiz->end_piece; piece++) {
     int priority;
 
     if (h.have_piece (piece))
@@ -974,7 +974,7 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
 
           g_mutex_lock (stream->lock);
-          if (p->piece_index < stream->start_piece &&
+          if (p->piece_index < stream->start_piece ||
               p->piece_index > stream->end_piece) {
             g_mutex_unlock (stream->lock);
             continue;
