@@ -1242,7 +1242,8 @@ gst_bt_demux_task_setup (GstBtDemux * thiz)
   gst_task_start (thiz->push_task);
 
   /* our ipc between tasks */
-  thiz->ipc = g_async_queue_new_full ((GDestroyNotify)gst_buffer_unref);
+  thiz->ipc = g_async_queue_new_full (
+      (GDestroyNotify)gst_bt_demux_buffer_data_free);
 }
 
 static void
