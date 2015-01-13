@@ -1255,6 +1255,19 @@ gst_bt_demux_task_cleanup (GstBtDemux * thiz)
   s = (session *)thiz->session;
   torrents = s->get_torrents ();
 
+  if (thiz->push_task) {
+    GstBtDemuxBufferData *ipc_data;
+
+    /* send a cleanup buffer */
+    ipc_data = g_new0 (GstBtDemuxBufferData, 1);
+    g_async_queue_push (thiz->ipc, ipc_data);
+
+    gst_task_stop (thiz->push_task); 
+    gst_task_join (thiz->push_task);
+    gst_object_unref (thiz->push_task);
+    thiz->push_task = NULL;
+  }
+
   if (torrents.size () < 1) {
     /* nothing added, stop the task directly */
     thiz->finished = TRUE;
@@ -1272,19 +1285,6 @@ gst_bt_demux_task_cleanup (GstBtDemux * thiz)
     gst_task_join (thiz->task);
     gst_object_unref (thiz->task);
     thiz->task = NULL;
-  }
-
-  if (thiz->push_task) {
-    GstBtDemuxBufferData *ipc_data;
-
-    /* send a cleanup buffer */
-    ipc_data = g_new0 (GstBtDemuxBufferData, 1);
-    g_async_queue_push (thiz->ipc, ipc_data);
-
-    gst_task_stop (thiz->push_task); 
-    gst_task_join (thiz->push_task);
-    gst_object_unref (thiz->push_task);
-    thiz->push_task = NULL;
   }
 
   if (thiz->ipc) {
