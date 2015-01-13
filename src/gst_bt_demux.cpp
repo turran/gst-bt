@@ -28,7 +28,7 @@
 #endif
 
 #include "gst_bt_demux.hpp"
-
+#include <gst/base/gsttypefindhelper.h>
 #include <iterator>
 #include <deque>
 
@@ -1132,8 +1132,37 @@ gst_bt_demux_push_loop (gpointer user_data)
       continue;
     }
 
+    /* create the buffer */
+    buf = gst_buffer_new ();
+    GST_BUFFER_DATA (buf) = (guint8 *)ipc_data->buffer.get ();
+
+    buf_data = g_new0 (GstBtDemuxBufferData, 1);
+    buf_data->buffer = ipc_data->buffer;
+    GST_BUFFER_MALLOCDATA (buf) = (guint8 *)buf_data;
+    GST_BUFFER_FREE_FUNC (buf) = gst_bt_demux_buffer_data_free;
+
+    GST_BUFFER_SIZE (buf) = ipc_data->size;
+    /* handle the offsets */
+    if (ipc_data->piece == stream->start_piece) {
+      GST_BUFFER_DATA (buf) = GST_BUFFER_DATA (buf) + stream->start_offset;
+      GST_BUFFER_SIZE (buf) -= stream->start_offset;
+    }
+
+    if (ipc_data->piece == stream->end_piece) {
+      GST_BUFFER_SIZE (buf) -= GST_BUFFER_SIZE (buf) - stream->end_offset;
+    }
+
     /* create the pad if needed */
     if (!gst_pad_is_active (GST_PAD (stream))) {
+      GstTypeFindProbability prob;
+      GstCaps *caps;
+
+      /* TODO make this configurable liek filesrc */
+      caps = gst_type_find_helper_for_buffer (GST_OBJECT (thiz), buf, &prob);
+      if (caps) {
+        gst_pad_set_caps (GST_PAD (stream), caps);
+      }
+      GST_ERROR ("caps should be %" GST_PTR_FORMAT, caps);
       gst_pad_set_active (GST_PAD (stream), TRUE);
       gst_element_add_pad (GST_ELEMENT (thiz), GST_PAD (
           gst_object_ref (stream)));
@@ -1169,27 +1198,6 @@ gst_bt_demux_push_loop (gpointer user_data)
       gst_pad_push_event (GST_PAD (stream), event);
       stream->pending_segment = FALSE;
     }
-
-    buf = gst_buffer_new ();
-    GST_BUFFER_DATA (buf) = (guint8 *)ipc_data->buffer.get ();
-
-    buf_data = g_new0 (GstBtDemuxBufferData, 1);
-    buf_data->buffer = ipc_data->buffer;
-    GST_BUFFER_MALLOCDATA (buf) = (guint8 *)buf_data;
-    GST_BUFFER_FREE_FUNC (buf) = gst_bt_demux_buffer_data_free;
-
-    GST_BUFFER_SIZE (buf) = ipc_data->size;
-
-    /* handle the offsets */
-    if (ipc_data->piece == stream->start_piece) {
-      GST_BUFFER_DATA (buf) = GST_BUFFER_DATA (buf) + stream->start_offset;
-      GST_BUFFER_SIZE (buf) -= stream->start_offset;
-    }
-
-    if (ipc_data->piece == stream->end_piece) {
-      GST_BUFFER_SIZE (buf) -= GST_BUFFER_SIZE (buf) - stream->end_offset;
-    }
-
 
     GST_DEBUG_OBJECT (thiz, "Pushing buffer, size: %d, file: %d, piece: %d",
         GST_BUFFER_SIZE (buf), stream->idx, ipc_data->piece);
