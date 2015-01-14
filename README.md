@@ -23,11 +23,13 @@ For user installation:
 
 Available plugins
 =================
-+ btdemux
++ btdemux BitTorrent demuxer
++ btsrc Magnet URI source
 
 Examples
 ========
 ```gst-launch-0.10 filesrc location=your.torrent ! btdemux ! decodebin2 ! autovideosink```
+```gst-launch-0.10 btsrc uri=magnet:yourmagnet ! btdemux ! decodebin2 ! autovideosink```
 
 Communication
 =============
