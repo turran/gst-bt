@@ -1081,6 +1081,7 @@ gst_bt_demux_loop (gpointer user_data)
       alerts.clear();
     }
   }
+  gst_task_stop (thiz->task);
 }
 
 static void
