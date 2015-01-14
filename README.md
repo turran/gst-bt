@@ -5,7 +5,7 @@ Gst-Bt is a collection of plugins that integrates BitTorrent into GStreamer
 
 Dependencies
 ============
-+ GStreamer
++ GStreamer 0.10 (GStreamer 1.0 is on the TODO)
 + [libtorrent](http://www.rasterbar.com/products/libtorrent/)
 
 Building and Installation
