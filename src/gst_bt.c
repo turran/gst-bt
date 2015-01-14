@@ -22,6 +22,7 @@
 
 #include <gst/gst.h>
 #include "gst_bt_demux.hpp"
+#include "gst_bt_type.h"
 
 GST_DEBUG_CATEGORY (gst_bt_demux_debug);
 
@@ -34,6 +35,12 @@ plugin_init (GstPlugin * plugin)
   if (!gst_element_register (plugin, "btdemux",
           GST_RANK_PRIMARY + 1, GST_TYPE_BT_DEMUX))
     return FALSE;
+
+  if (!gst_element_register (plugin, "btsrc",
+          GST_RANK_PRIMARY + 1, GST_TYPE_BT_SRC))
+    return FALSE;
+
+  gst_bt_type_init (plugin);
 
   return TRUE;
 }
