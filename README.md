@@ -16,10 +16,14 @@ make
 ```
 
 For system wide installation:
-```make install```
+```
+make install
+```
 
 For user installation:
-```cp src/.libs/libgstbt.so ~/.gstreamer-0.10/plugins/```
+```
+cp src/.libs/libgstbt.so ~/.gstreamer-0.10/plugins/
+```
 
 Available plugins
 =================
@@ -28,8 +32,10 @@ Available plugins
 
 Examples
 ========
-```gst-launch-0.10 filesrc location=your.torrent ! btdemux ! decodebin2 ! autovideosink```
-```gst-launch-0.10 btsrc uri=magnet:yourmagnet ! btdemux ! decodebin2 ! autovideosink```
+```
+gst-launch-0.10 filesrc location=your.torrent ! btdemux ! decodebin2 ! autovideosink
+gst-launch-0.10 btsrc uri=magnet:yourmagnet ! btdemux ! decodebin2 ! autovideosink
+```
 
 Communication
 =============
