@@ -21,16 +21,19 @@
 #endif
 
 #include <gst/gst.h>
+#include "gst_bt_src.hpp"
 #include "gst_bt_demux.hpp"
 #include "gst_bt_type.h"
 
 GST_DEBUG_CATEGORY (gst_bt_demux_debug);
+GST_DEBUG_CATEGORY (gst_bt_src_debug);
 
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
   /* first register the debug categories */
   GST_DEBUG_CATEGORY_INIT (gst_bt_demux_debug, "btdemux", 0, "BitTorrent demuxer");
+  GST_DEBUG_CATEGORY_INIT (gst_bt_src_debug, "btsrc", 0, "BitTorrent source");
 
   if (!gst_element_register (plugin, "btdemux",
           GST_RANK_PRIMARY + 1, GST_TYPE_BT_DEMUX))

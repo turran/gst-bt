@@ -5,6 +5,8 @@ src_libgstbt_la_SOURCES = \
 src/gst_bt.c \
 src/gst_bt_type.c \
 src/gst_bt_type.h \
+src/gst_bt_src.cpp \
+src/gst_bt_src.hpp \
 src/gst_bt_demux.cpp \
 src/gst_bt_demux.hpp
 
