@@ -49,6 +49,6 @@ plugin_init (GstPlugin * plugin)
  */
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR, GST_VERSION_MINOR,
     "bt", "BitTorrent Plugin",
-    plugin_init, VERSION, GST_LICENSE_UNKNOWN, PACKAGE_NAME,
+    plugin_init, VERSION, "LGPL", PACKAGE_NAME,
     "http://www.turran.org");
 
