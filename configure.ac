@@ -54,18 +54,41 @@ fi
 ### Checks for libraries
 gst_bt_requirements_cflags=""
 gst_bt_requirements_libs=""
-gst_bt_requirements_pc="gstreamer-0.10 gstreamer-base-0.10 libtorrent-rasterbar"
+gst_bt_requirements_pc="libtorrent-rasterbar"
+
+
+gstreamer_api_default="0.10"
+AC_ARG_WITH(gstreamer-api,
+   AS_HELP_STRING([--with-gstreamer-api],
+       [manually set the gstreamer API version 0.10 or 1.0 are valid values]),
+       [gstreamer_api="${withval}"])
+
+if test "x$gstreamer_api" = "x" ; then
+  gstreamer_api="${gstreamer_api_default}"
+fi
+
+case "$gstreamer_api" in
+  1.0)
+  gst_bt_requirements_pc+=" gstreamer-1.0 gstreamer-base-1.0"
+  AC_DEFINE_UNQUOTED(HAVE_GST_1, [1], [Use GStreamer 1.0])
+  ;;
+  0.10)
+  gst_bt_requirements_pc+=" gstreamer-0.10 gstreamer-base-0.10"
+  AC_DEFINE_UNQUOTED(HAVE_GST_0, [1], [Use GStreamer 0.10])
+  ;;
+  *)
+  AC_MSG_ERROR([Unsupported gstreamer version "$gstreamer_api"])
+  ;;
+esac
 
 dnl make GST_MAJORMINOR available in Makefile.am
-GST_MAJORMINOR=0.10
+GST_MAJORMINOR=$gstreamer_api
 AC_SUBST(GST_MAJORMINOR)
 
 PKG_CHECK_MODULES([GST_BT], [${gst_bt_requirements_pc}])
 
 GST_BT_LIBS="${GST_BT_LIBS} ${gst_bt_requirements_libs}"
 GST_BT_CFLAGS="${GST_BT_CFLAGS} ${gst_bt_requirements_cflags}"
-
-## TODO Dependencies for the modules
 
 ## Make the debug preprocessor configurable
 
