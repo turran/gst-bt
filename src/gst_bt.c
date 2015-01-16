@@ -25,6 +25,12 @@
 #include "gst_bt_demux.hpp"
 #include "gst_bt_type.h"
 
+#if HAVE_GST_1
+#define PLUGIN_NAME bt
+#else
+#define PLUGIN_NAME "bt"
+#endif
+
 GST_DEBUG_CATEGORY (gst_bt_demux_debug);
 GST_DEBUG_CATEGORY (gst_bt_src_debug);
 
@@ -51,7 +57,7 @@ plugin_init (GstPlugin * plugin)
 /* this is the structure that gstreamer looks for to register plugins
  */
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR, GST_VERSION_MINOR,
-    "bt", "BitTorrent Plugin",
+    PLUGIN_NAME, "BitTorrent Plugin",
     plugin_init, VERSION, "LGPL", PACKAGE_NAME,
     "http://www.turran.org");
 

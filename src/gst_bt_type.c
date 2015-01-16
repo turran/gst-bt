@@ -29,6 +29,13 @@ gst_bt_type_find (GstTypeFind * tf, gpointer unused)
 gboolean
 gst_bt_type_init (GstPlugin * plugin)
 {
+#if HAVE_GST_1
+  /* register the mpd type find */
+  if (!gst_type_find_register (plugin, "application/x-bittorrent",
+      GST_RANK_PRIMARY, gst_bt_type_find, "torrent", GST_BT_CAPS,
+      NULL, NULL))
+    return FALSE;
+#else
   static const gchar *exts[] = { "torrent", NULL };
 
   /* register the mpd type find */
@@ -36,7 +43,7 @@ gst_bt_type_init (GstPlugin * plugin)
       GST_RANK_PRIMARY, gst_bt_type_find, (char **) exts, GST_BT_CAPS,
       NULL, NULL))
     return FALSE;
-
+#endif
   return TRUE;
 }
 
