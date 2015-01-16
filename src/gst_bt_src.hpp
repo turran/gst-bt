@@ -19,6 +19,10 @@
 #ifndef GST_BT_SRC_H
 #define GST_BT_SRC_H
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include <gst/gst.h>
 
 G_BEGIN_DECLS
@@ -43,8 +47,11 @@ typedef struct _GstBtSrc
   gboolean finished;
 
   GstTask *task;
+#if HAVE_GST_1
+  GRecMutex task_lock;
+#else
   GStaticRecMutex task_lock;
-
+#endif
 } GstBtSrc;
 
 typedef struct _GstBtSrcClass

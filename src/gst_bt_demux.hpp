@@ -19,6 +19,10 @@
 #ifndef GST_BT_DEMUX_H
 #define GST_BT_DEMUX_H
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include <gst/gst.h>
 #include <gst/base/gstadapter.h>
 
@@ -105,10 +109,14 @@ typedef struct _GstBtDemux
   gpointer session;
 
   GstTask *task;
-  GStaticRecMutex task_lock;
-
   GstTask *push_task;
+#if HAVE_GST_1
+  GRecMutex task_lock;
+  GRecMutex push_task_lock;
+#else
+  GStaticRecMutex task_lock;
   GStaticRecMutex push_task_lock;
+#endif
 
   GAsyncQueue *ipc;
 } GstBtDemux;
