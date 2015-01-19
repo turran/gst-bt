@@ -10,18 +10,18 @@ Dependencies
 
 Building and Installation
 =========================
-```
+```bash
 ./configure
 make
 ```
 
 For system wide installation:
-```
+```bash
 make install
 ```
 
 For user installation:
-```
+```bash
 cp src/.libs/libgstbt.so ~/.gstreamer-0.10/plugins/
 ```
 
@@ -32,7 +32,7 @@ Available plugins
 
 Examples
 ========
-```
+```bash
 gst-launch-0.10 filesrc location=your.torrent ! btdemux ! decodebin2 ! autovideosink
 gst-launch-0.10 btsrc uri=magnet:yourmagnet ! btdemux ! decodebin2 ! autovideosink
 ```
