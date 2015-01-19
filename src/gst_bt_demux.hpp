@@ -69,6 +69,7 @@ typedef struct _GstBtDemuxStream
   gint start_piece;
   gint end_offset;
   gint end_piece;
+  gint last_piece;
 
   gint64 start_byte;
   gint64 end_byte;
@@ -80,7 +81,7 @@ typedef struct _GstBtDemuxStream
   gint buffering_level;
   gint buffering_count;
 
-  GMutex *lock;
+  GStaticRecMutex *lock;
 } GstBtDemuxStream;
 
 typedef struct _GstBtDemuxStreamClass {
