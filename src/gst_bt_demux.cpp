@@ -481,7 +481,7 @@ gst_bt_demux_stream_query_simple (GstPad * pad, GstQuery * query)
   gboolean ret = FALSE;
 
   object = gst_pad_get_parent (pad);
-  ret = gst_bt_demux_stream_query (pad, object, event);
+  ret = gst_bt_demux_stream_query (pad, object, query);
   gst_object_unref (object);
 
   return ret;
@@ -663,13 +663,13 @@ gst_bt_demux_sink_chain_simple (GstPad * pad, GstBuffer * buffer)
 }
 
 static gboolean
-gst_bt_demux_sink_event_simple (GstPad * pad, GstBuffer * buffer)
+gst_bt_demux_sink_event_simple (GstPad * pad, GstEvent * event)
 {
   GstObject *object;
   gboolean ret;
 
   object = gst_pad_get_parent (pad);
-  ret = gst_bt_demux_sink_event (pad, object, buffer);
+  ret = gst_bt_demux_sink_event (pad, object, event);
   gst_object_unref (object);
 
   return ret;
@@ -1257,7 +1257,7 @@ gst_bt_demux_push_loop (gpointer user_data)
     buf = gst_buffer_new ();
     GST_BUFFER_DATA (buf) = data;
     GST_BUFFER_SIZE (buf) = size;
-    GST_BUFFER_MALLOCDATA (buf) = buf_data;
+    GST_BUFFER_MALLOCDATA (buf) = (guint8 *)buf_data;
     GST_BUFFER_FREE_FUNC (buf) = gst_bt_demux_buffer_data_free;
 #endif
 
