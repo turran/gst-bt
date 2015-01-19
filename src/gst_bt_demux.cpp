@@ -307,8 +307,6 @@ gst_bt_demux_stream_seek (GstBtDemuxStream * thiz, GstEvent * event)
     }
   }
 
-  g_static_rec_mutex_lock (thiz->lock);
-
   if (flags & GST_SEEK_FLAG_FLUSH) {
     GstEvent *flush_stop;
 
@@ -326,6 +324,8 @@ gst_bt_demux_stream_seek (GstBtDemuxStream * thiz, GstEvent * event)
   if (flags & GST_SEEK_FLAG_SEGMENT) {
     GST_ERROR ("Segment seek");
   }
+
+  g_static_rec_mutex_lock (thiz->lock);
 
   /* update the stream segment */
   thiz->start_byte = start;
