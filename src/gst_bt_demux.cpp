@@ -21,6 +21,7 @@
  * + Implement queries:
  *   buffering level
  *   position
+ * + Implenent the element to work in pull mode
  */
 
 #ifdef HAVE_CONFIG_H
@@ -429,34 +430,12 @@ gst_bt_demux_stream_query (GstPad * pad, GstObject * object, GstQuery * query)
       }
       break;
 
+    /* TODO add suport for buffering ranges
+     * The API get_download_queue() only returns the current
+     * downloading pieces, not the status of every piece, so we need
+     * to track every piece status
+     */
     case GST_QUERY_BUFFERING:
-      {
-        GstFormat format;
-
-        gst_query_parse_buffering_range (query, &format, NULL, NULL, NULL);
-        if (format == GST_FORMAT_BYTES) {
-          session *s;
-          torrent_handle h;
-          std::vector<partial_piece_info> pi;
-
-          demux = GST_BT_DEMUX (gst_pad_get_parent (GST_PAD (thiz)));
-          s = (session *)demux->session;
-          h = s->get_torrents ()[0];
-
-          h.get_download_queue (pi);
-          for (std::vector<partial_piece_info>::iterator it = pi.begin();
-              it != pi.end(); ++it) {
-
-            /* all the piece is finished */
-            if (it->finished == it->blocks_in_piece) {
-              // gst_query_add_buffering_range (query, pi...);
-            }
-          }
-          ret = TRUE;
-        }
-        break;
-      }
-
     default:
       break;
   }
