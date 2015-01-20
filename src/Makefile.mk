@@ -19,4 +19,4 @@ $(GST_BT_CFLAGS)
 src_libgstbt_la_LIBADD = \
 $(GST_BT_LIBS)
 
-libgstbt_la_LDFLAGS = -no-undefined -module -avoid-version
+src_libgstbt_la_LDFLAGS = -no-undefined -module -avoid-version
