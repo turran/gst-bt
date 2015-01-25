@@ -111,6 +111,7 @@ echo "Compilation.................................: make (or gmake)"
 echo "  CPPFLAGS..................................: $CPPFLAGS"
 echo "  CFLAGS....................................: $CFLAGS"
 echo "  LDFLAGS...................................: $LDFLAGS"
+echo "  GStreamer API.............................: $gstreamer_api"
 echo
 echo "Installation................................: make install (as root if needed, with 'su' or 'sudo')"
 echo "  prefix....................................: $prefix"
