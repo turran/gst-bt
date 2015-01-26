@@ -82,6 +82,7 @@ typedef struct _GstBtDemuxStream
   gint buffering_count;
 
   GStaticRecMutex *lock;
+  GAsyncQueue *ipc;
 } GstBtDemuxStream;
 
 typedef struct _GstBtDemuxStreamClass {
@@ -110,16 +111,11 @@ typedef struct _GstBtDemux
   gpointer session;
 
   GstTask *task;
-  GstTask *push_task;
 #if HAVE_GST_1
   GRecMutex task_lock;
-  GRecMutex push_task_lock;
 #else
   GStaticRecMutex task_lock;
-  GStaticRecMutex push_task_lock;
 #endif
-
-  GAsyncQueue *ipc;
 } GstBtDemux;
 
 typedef struct _GstBtDemuxClass
