@@ -20,6 +20,7 @@
 #include "config.h"
 #endif
 
+#include "gst_bt.h"
 #include "gst_bt_src.hpp"
 
 #include "libtorrent/session.hpp"
@@ -197,6 +198,7 @@ gst_bt_src_handle_alert (GstBtSrc * thiz, libtorrent::alert * a)
 
     case metadata_received_alert::alert_type:
       {
+        GstFlowReturn flow;
         metadata_received_alert *p = alert_cast<metadata_received_alert>(a);
         session *s;
         torrent_handle h = p->handle;
@@ -232,10 +234,16 @@ gst_bt_src_handle_alert (GstBtSrc * thiz, libtorrent::alert * a)
 #endif
 
         pad = gst_element_get_static_pad (GST_ELEMENT (thiz), "src");
-        ret = gst_pad_push (pad, buf);
+        flow = gst_pad_push (pad, buf);
+        if (flow == GST_FLOW_NOT_LINKED || flow <= GST_FLOW_UNEXPECTED) {
+          GST_ELEMENT_ERROR (thiz, STREAM, FAILED,
+              ("Internal data flow error."),
+              ("streaming task paused, reason %s (%d)",
+              gst_flow_get_name (flow), flow));
+        }
         gst_pad_push_event (pad, gst_event_new_eos ());
         gst_object_unref (pad);
-
+        ret = TRUE;
       }
       break;
 

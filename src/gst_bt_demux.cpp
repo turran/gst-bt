@@ -28,6 +28,7 @@
 #include "config.h"
 #endif
 
+#include "gst_bt.h"
 #include "gst_bt_demux.hpp"
 #include <gst/base/gsttypefindhelper.h>
 
@@ -181,8 +182,8 @@ gst_bt_demux_stream_push_loop (gpointer user_data)
   guint8 *data;
   session *s;
   torrent_handle h;
-  gboolean topology_changed = FALSE;
   gboolean update_buffering = FALSE;
+  gboolean send_eos = FALSE;
 
   thiz = GST_BT_DEMUX_STREAM (user_data);
   demux = GST_BT_DEMUX (gst_pad_get_parent (GST_PAD (thiz)));
@@ -280,8 +281,14 @@ gst_bt_demux_stream_push_loop (gpointer user_data)
   /* keep track of the current piece */
   thiz->current_piece = ipc_data->piece;
 
-  /* TODO handle the return value */
   ret = gst_pad_push (GST_PAD (thiz), buf);
+  if (ret == GST_FLOW_NOT_LINKED || ret <= GST_FLOW_UNEXPECTED) {
+    send_eos = TRUE;
+    GST_ELEMENT_ERROR (demux, STREAM, FAILED,
+        ("Internal data flow error."),
+        ("streaming task paused, reason %s (%d)", gst_flow_get_name (ret),
+        ret));
+  }
 
 #if 0
   /* send the end of segment in case we need to */
@@ -291,12 +298,16 @@ gst_bt_demux_stream_push_loop (gpointer user_data)
 #endif
 
   /* send the EOS downstream, check that last push didnt trigger a new seek */
-  if (ipc_data->piece == thiz->last_piece && !thiz->pending_segment) {
+  if (ipc_data->piece == thiz->last_piece && !thiz->pending_segment)
+    send_eos = TRUE;
+
+  if (send_eos) {
     GstEvent *eos;
 
     eos = gst_event_new_eos ();
     GST_DEBUG_OBJECT (thiz, "Sending EOS on file %d", thiz->idx);
     gst_pad_push_event (GST_PAD (thiz), eos);
+    gst_pad_pause_task (GST_PAD (thiz));
     thiz->finished = TRUE;
   }
   g_static_rec_mutex_unlock (thiz->lock);
