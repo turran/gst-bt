@@ -282,12 +282,14 @@ gst_bt_demux_stream_push_loop (gpointer user_data)
   thiz->current_piece = ipc_data->piece;
 
   ret = gst_pad_push (GST_PAD (thiz), buf);
-  if (ret == GST_FLOW_NOT_LINKED || ret <= GST_FLOW_UNEXPECTED) {
+  if (ret != GST_FLOW_OK) {
     send_eos = TRUE;
-    GST_ELEMENT_ERROR (demux, STREAM, FAILED,
-        ("Internal data flow error."),
-        ("streaming task paused, reason %s (%d)", gst_flow_get_name (ret),
-        ret));
+    if (ret == GST_FLOW_NOT_LINKED || ret <= GST_FLOW_UNEXPECTED) {
+      GST_ELEMENT_ERROR (demux, STREAM, FAILED,
+          ("Internal data flow error."),
+          ("streaming task paused, reason %s (%d)", gst_flow_get_name (ret),
+          ret));
+    }
   }
 
 #if 0

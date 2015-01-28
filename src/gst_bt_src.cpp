@@ -235,15 +235,17 @@ gst_bt_src_handle_alert (GstBtSrc * thiz, libtorrent::alert * a)
 
         pad = gst_element_get_static_pad (GST_ELEMENT (thiz), "src");
         flow = gst_pad_push (pad, buf);
-        if (flow == GST_FLOW_NOT_LINKED || flow <= GST_FLOW_UNEXPECTED) {
-          GST_ELEMENT_ERROR (thiz, STREAM, FAILED,
-              ("Internal data flow error."),
-              ("streaming task paused, reason %s (%d)",
-              gst_flow_get_name (flow), flow));
+        if (flow != GST_FLOW_OK) {
+          if (flow == GST_FLOW_NOT_LINKED || flow <= GST_FLOW_UNEXPECTED) {
+            GST_ELEMENT_ERROR (thiz, STREAM, FAILED,
+                ("Internal data flow error."),
+                ("streaming task paused, reason %s (%d)",
+                gst_flow_get_name (flow), flow));
+          }
+          ret = FALSE;
+          gst_pad_push_event (pad, gst_event_new_eos ());
         }
-        gst_pad_push_event (pad, gst_event_new_eos ());
         gst_object_unref (pad);
-        ret = TRUE;
       }
       break;
 
