@@ -184,9 +184,10 @@ gst_bt_src_handle_alert (GstBtSrc * thiz, libtorrent::alert * a)
         add_torrent_alert *p = alert_cast<add_torrent_alert>(a);
 
         if (p->error) {
-          /* TODO send an error */
-          GST_ERROR_OBJECT (thiz, "Error '%s' while adding the torrent",
-              p->error.message ().c_str ());
+          GST_ELEMENT_ERROR (thiz, STREAM, FAILED,
+              ("Error while adding the torrent."),
+              ("libtorrent says %s", p->error.message ().c_str ()));
+          ret = TRUE;
         }
         break;
       }
