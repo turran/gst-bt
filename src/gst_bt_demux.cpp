@@ -1337,6 +1337,11 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
 
           /* create the pad if needed */
           if (!gst_pad_is_active (GST_PAD (stream))) {
+            gst_pad_set_active (GST_PAD (stream), TRUE);
+            gst_element_add_pad (GST_ELEMENT (thiz), GST_PAD (
+                gst_object_ref (stream)));
+            topology_changed = TRUE;
+
             if (thiz->typefind) {
               GstTypeFindProbability prob;
               GstCaps *caps;
@@ -1350,12 +1355,9 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
 
               if (caps) {
                 gst_pad_set_caps (GST_PAD (stream), caps);
+                gst_caps_unref (caps);
               }
             }
-            gst_pad_set_active (GST_PAD (stream), TRUE);
-            gst_element_add_pad (GST_ELEMENT (thiz), GST_PAD (
-                gst_object_ref (stream)));
-            topology_changed = TRUE;
           }
 
           /* send the data to the stream thread */
