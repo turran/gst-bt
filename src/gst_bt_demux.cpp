@@ -617,15 +617,18 @@ gst_bt_demux_stream_query (GstPad * pad, GstObject * object, GstQuery * query)
       {
         session *s;
         torrent_handle h;
+        GstFormat fmt;
         gint64 bytes;
 
         s = (session *)demux->session;
         h = s->get_torrents ()[0];
 
-        gst_bt_demux_stream_info (thiz, h, NULL, NULL, NULL, NULL, &bytes);
-        gst_query_set_duration (query, GST_FORMAT_BYTES, bytes);
-
-        ret = TRUE;
+        gst_query_parse_duration (query, &fmt, NULL);
+        if (fmt == GST_FORMAT_BYTES) {
+          gst_bt_demux_stream_info (thiz, h, NULL, NULL, NULL, NULL, &bytes);
+          gst_query_set_duration (query, GST_FORMAT_BYTES, bytes);
+          ret = TRUE;
+        }
       }
       break;
 
