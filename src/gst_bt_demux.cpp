@@ -178,7 +178,6 @@ gst_bt_demux_stream_push_loop (gpointer user_data)
   GstFlowReturn ret;
   GstBtDemuxBufferData *buf_data;
   GSList *walk;
-  gint size;
   guint8 *data;
   session *s;
   torrent_handle h;
@@ -276,7 +275,7 @@ gst_bt_demux_stream_push_loop (gpointer user_data)
   }
 
   GST_DEBUG_OBJECT (thiz, "Pushing buffer, size: %d, file: %d, piece: %d",
-      size, thiz->idx, ipc_data->piece);
+      ipc_data->size, thiz->idx, ipc_data->piece);
 
   /* keep track of the current piece */
   thiz->current_piece = ipc_data->piece;
