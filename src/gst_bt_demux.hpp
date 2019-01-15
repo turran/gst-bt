@@ -58,6 +58,7 @@ typedef enum _GstBtDemuxSelectorPolicy {
   GST_BT_DEMUX_SELECTOR_POLICY_LARGER,
 } GstBtDemuxSelectorPolicy;
 
+// TODO: move GstBtDemuxStream to a separate file
 typedef struct _GstBtDemuxStream
 {
   GstPad pad;
@@ -81,7 +82,7 @@ typedef struct _GstBtDemuxStream
   gint buffering_level;
   gint buffering_count;
 
-  GStaticRecMutex *lock;
+  GRecMutex lock;
   GAsyncQueue *ipc;
 } GstBtDemuxStream;
 
@@ -97,7 +98,7 @@ typedef struct _GstBtDemux
   GstAdapter *adapter;
 
   GstBtDemuxSelectorPolicy policy;
-  GMutex *streams_lock;
+  GMutex streams_lock;
   GSList *streams;
   gchar *requested_streams;
   gboolean typefind;

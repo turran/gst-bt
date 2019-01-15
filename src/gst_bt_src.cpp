@@ -171,7 +171,7 @@ gst_bt_src_set_uri (GstBtSrc * thiz, const gchar * uri)
 
 /* thread reading messages from libtorrent */
 static gboolean
-gst_bt_src_handle_alert (GstBtSrc * thiz, libtorrent::alert * a)
+gst_bt_src_handle_alert (GstBtSrc * thiz, const libtorrent::alert * a)
 {
   using namespace libtorrent;
   gboolean ret = FALSE;
@@ -181,7 +181,7 @@ gst_bt_src_handle_alert (GstBtSrc * thiz, libtorrent::alert * a)
   switch (a->type()) {
     case add_torrent_alert::alert_type:
       {
-        add_torrent_alert *p = alert_cast<add_torrent_alert>(a);
+        const add_torrent_alert *p = alert_cast<add_torrent_alert>(a);
 
         if (p->error) {
           GST_ELEMENT_ERROR (thiz, STREAM, FAILED,
@@ -200,7 +200,7 @@ gst_bt_src_handle_alert (GstBtSrc * thiz, libtorrent::alert * a)
     case metadata_received_alert::alert_type:
       {
         GstFlowReturn flow;
-        metadata_received_alert *p = alert_cast<metadata_received_alert>(a);
+        const metadata_received_alert *p = alert_cast<metadata_received_alert>(a);
         session *s;
         torrent_handle h = p->handle;
         torrent_info ti = h.get_torrent_info ();
@@ -262,29 +262,27 @@ static void
 gst_bt_src_loop (gpointer user_data)
 {
   using namespace libtorrent;
-  GstBtSrc *thiz;
+  GstBtSrc *btsrc;
+  session *s;
 
-  thiz = GST_BT_SRC (user_data);
-  while (!thiz->finished) {
-    session *s;
-    s = (session *)thiz->session;
+  btsrc = GST_BT_SRC (user_data);
+  s = (session *)btsrc->session;
+
+  while (!btsrc->finished) {
 
     if (s->wait_for_alert (libtorrent::seconds(10)) != NULL) {
-      std::deque<alert*> alerts;
+      std::vector<alert*> alerts;
       s->pop_alerts(&alerts);
 
       /* handle every alert */
-      for (std::deque<libtorrent::alert*>::iterator i = alerts.begin(),
-          end(alerts.end()); i != end; ++i) {
-
-        if (!thiz->finished)
-          thiz->finished = gst_bt_src_handle_alert (thiz, *i);
-        delete *i;
+      for (const alert * a : alerts) {
+        if (!btsrc->finished)
+          btsrc->finished = gst_bt_src_handle_alert (btsrc, a);
       }
-      alerts.clear();
     }
   }
-  gst_task_stop (thiz->task);
+
+  gst_task_stop (btsrc->task);
 }
 
 static void
@@ -494,17 +492,21 @@ static void
 gst_bt_src_init (GstBtSrc * thiz)
 {
   using namespace libtorrent;
+
   GstPad *pad;
+
   session *s;
+  settings_pack session_settings;
 
   pad = gst_pad_new_from_static_template (&src_factory, "src");
   gst_element_add_pad (GST_ELEMENT (thiz), pad);
 
-  /* create a new session */
-  s = new session ();
   /* set the error alerts and the progress alerts */
-  s->set_alert_mask (alert::error_notification | alert::progress_notification |
-      alert::status_notification);
+  session_settings.set_int(settings_pack::alert_mask,
+          alert::error_notification | alert::progress_notification | alert::status_notification);
+
+  /* create a new session */
+  s = new session (session_settings);
   thiz->session = s;
 
 #if HAVE_GST_1

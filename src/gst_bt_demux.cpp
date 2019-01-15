@@ -42,6 +42,14 @@
 #include "libtorrent/alert_types.hpp"
 #include "libtorrent/time.hpp"
 
+#define GST_BT_DEMUX_STREAMS_LOCK(o) (g_mutex_lock(&o->streams_lock))
+#define GST_BT_DEMUX_STREAMS_UNLOCK(o) (g_mutex_unlock(&o->streams_lock))
+
+#define GST_BT_DEMUX_STREAM_MUTEX_INIT(o) (g_rec_mutex_init(&o->lock))
+#define GST_BT_DEMUX_STREAM_MUTEX_CLEAR(o) (g_rec_mutex_clear(&o->lock))
+#define GST_BT_DEMUX_STREAM_LOCK(o) (g_rec_mutex_lock(&o->lock))
+#define GST_BT_DEMUX_STREAM_UNLOCK(o) (g_rec_mutex_unlock(&o->lock))
+
 #define DEFAULT_TYPEFIND TRUE
 #define DEFAULT_BUFFER_PIECES 3
 #define DEFAULT_DIR "btdemux"
@@ -52,9 +60,9 @@ GST_DEBUG_CATEGORY_EXTERN (gst_bt_demux_debug);
 
 /* Forward declarations */
 static void
-gst_bt_demux_send_buffering (GstBtDemux * thiz, libtorrent::torrent_handle h);
+gst_bt_demux_send_buffering (GstBtDemux * btdemux, libtorrent::torrent_handle h);
 static void
-gst_bt_demux_check_no_more_pads (GstBtDemux * thiz);
+gst_bt_demux_check_no_more_pads (GstBtDemux * btdemux);
 
 typedef struct _GstBtDemuxBufferData
 {
@@ -135,44 +143,44 @@ gst_bt_demux_selector_policy_get_type (void)
 G_DEFINE_TYPE (GstBtDemuxStream, gst_bt_demux_stream, GST_TYPE_PAD);
 
 static gboolean
-gst_bt_demux_stream_start_buffering (GstBtDemuxStream * thiz,
+gst_bt_demux_stream_start_buffering (GstBtDemuxStream * btstream,
     libtorrent::torrent_handle h, int max_pieces)
 {
   using namespace libtorrent;
   int i;
-  int start = thiz->current_piece + 1;
-  int end = thiz->current_piece + max_pieces;
+  int start = btstream->current_piece + 1;
+  int end = btstream->current_piece + max_pieces;
 
   /* do not overflow */
-  if (end > thiz->end_piece)
-    end = thiz->end_piece;
+  if (end > btstream->end_piece)
+    end = btstream->end_piece;
 
   /* count how many consecutive pieces need to be downloaded */
-  thiz->buffering_count = 0;
+  btstream->buffering_count = 0;
   for (i = start; i <= end; i++) {
 
     /* already downloaded */
     if (h.have_piece (i))
       continue;
 
-    thiz->buffering_count++;
+    btstream->buffering_count++;
   }
 
-  if (thiz->buffering_count) {
-    thiz->buffering = TRUE;
-    thiz->buffering_level = 0;
+  if (btstream->buffering_count) {
+    btstream->buffering = TRUE;
+    btstream->buffering_level = 0;
     return TRUE;
-  } else {
-    return FALSE;
   }
+  
+  return FALSE;
 }
 
 static void
 gst_bt_demux_stream_push_loop (gpointer user_data)
 {
   using namespace libtorrent;
-  GstBtDemux *demux;
-  GstBtDemuxStream *thiz;
+  GstBtDemux *btdemux;
+  GstBtDemuxStream *btstream;
   GstBtDemuxBufferData *ipc_data;
   GstBuffer *buf;
   GstFlowReturn ret;
@@ -181,20 +189,25 @@ gst_bt_demux_stream_push_loop (gpointer user_data)
   guint8 *data;
   session *s;
   torrent_handle h;
-  gboolean update_buffering = FALSE;
-  gboolean send_eos = FALSE;
+  gboolean update_buffering;
+  gboolean send_eos;
+  
+  update_buffering = FALSE;
+  send_eos = FALSE;
 
-  thiz = GST_BT_DEMUX_STREAM (user_data);
-  demux = GST_BT_DEMUX (gst_pad_get_parent (GST_PAD (thiz)));
+  btstream = GST_BT_DEMUX_STREAM (user_data);
+  btdemux = GST_BT_DEMUX (gst_pad_get_parent (GST_PAD (btstream)));
 
-  if (demux->finished) {
-    gst_pad_pause_task (GST_PAD (thiz));
+  // GST_BT_DEMUX_STREAM_LOCK (btdemux);
+
+  if (btdemux->finished) {
+    gst_pad_pause_task (GST_PAD (btstream));
     return;
   }
 
-  ipc_data = (GstBtDemuxBufferData *)g_async_queue_pop (thiz->ipc);
+  ipc_data = (GstBtDemuxBufferData *)g_async_queue_pop (btstream->ipc);
   if (!ipc_data) {
-    gst_pad_pause_task (GST_PAD (thiz));
+    gst_pad_pause_task (GST_PAD (btstream));
     return;
   }
 
@@ -203,56 +216,59 @@ gst_bt_demux_stream_push_loop (gpointer user_data)
     return;
   }
 
-  s = (session *)demux->session;
+  s = (session *)btdemux->session;
   h = s->get_torrents ()[0];
 
-  g_static_rec_mutex_lock (thiz->lock);
-  if (ipc_data->piece < thiz->start_piece && ipc_data->piece > thiz->end_piece) {
+  GST_BT_DEMUX_STREAM_LOCK(btstream);
+
+  if (ipc_data->piece < btstream->start_piece && 
+      ipc_data->piece > btstream->end_piece) {
     gst_bt_demux_buffer_data_free (ipc_data);
-    g_static_rec_mutex_unlock (thiz->lock);
+
+    GST_BT_DEMUX_STREAM_UNLOCK (btstream);
     return;
   }
 
-  if (!thiz->requested) {
+  if (!btstream->requested) {
     gst_bt_demux_buffer_data_free (ipc_data);
-    g_static_rec_mutex_unlock (thiz->lock);
+    GST_BT_DEMUX_STREAM_UNLOCK (btstream);
     return;
   }
 
   /* in case we are not expecting this buffer */
-  if (ipc_data->piece != thiz->current_piece + 1) {
-    GST_DEBUG_OBJECT (thiz, "Dropping piece %d, waiting for %d on "
-        "file %d", ipc_data->piece, thiz->current_piece + 1, thiz->idx);
+  if (ipc_data->piece != btstream->current_piece + 1) {
+    GST_DEBUG_OBJECT (btstream, "Dropping piece %d, waiting for %d on "
+        "file %d", ipc_data->piece, btstream->current_piece + 1, btstream->idx);
     gst_bt_demux_buffer_data_free (ipc_data);
-    g_static_rec_mutex_unlock (thiz->lock);
+    GST_BT_DEMUX_STREAM_UNLOCK(btstream);
     return;
   }
 
   buf = gst_bt_demux_buffer_new (ipc_data->buffer, ipc_data->piece,
-    ipc_data->size, thiz);
+    ipc_data->size, btstream);
 
-  GST_DEBUG_OBJECT (thiz, "Received piece %d of size %d on file %d",
-      ipc_data->piece, ipc_data->size, thiz->idx);
+  GST_DEBUG_OBJECT (btstream, "Received piece %d of size %d on file %d",
+      ipc_data->piece, ipc_data->size, btstream->idx);
 
   /* read the next piece */
-  if (ipc_data->piece + 1 <= thiz->end_piece) {
+  if (ipc_data->piece + 1 <= btstream->end_piece) {
     if (h.have_piece (ipc_data->piece + 1)) {
-      GST_DEBUG_OBJECT (thiz, "Reading next piece %d, current: %d",
-          ipc_data->piece + 1, thiz->current_piece);
+      GST_DEBUG_OBJECT (btstream, "Reading next piece %d, current: %d",
+          ipc_data->piece + 1, btstream->current_piece);
       h.read_piece (ipc_data->piece + 1);
     } else {
       int i;
 
-      GST_DEBUG_OBJECT (thiz, "Start buffering next piece %d",
+      GST_DEBUG_OBJECT (btstream, "Start buffering next piece %d",
           ipc_data->piece + 1);
       /* start buffering now that the piece is not available */
-      gst_bt_demux_stream_start_buffering (thiz, h,
-          demux->buffer_pieces);
+      gst_bt_demux_stream_start_buffering (btstream, h,
+          btdemux->buffer_pieces);
       update_buffering = TRUE;
     }
   }
 
-  if (thiz->pending_segment) {
+  if (btstream->pending_segment) {
     GstEvent *event;
 #if HAVE_GST_1
     GstSegment *segment;
@@ -263,34 +279,35 @@ gst_bt_demux_stream_push_loop (gpointer user_data)
     segment = gst_segment_new ();
     gst_segment_init (segment, GST_FORMAT_BYTES);
     gst_segment_do_seek (segment, 1.0, GST_FORMAT_BYTES,
-        GST_SEEK_FLAG_NONE, GST_SEEK_TYPE_SET, thiz->start_byte,
-        GST_SEEK_TYPE_SET, thiz->end_byte, &update);
+        GST_SEEK_FLAG_NONE, GST_SEEK_TYPE_SET, btstream->start_byte,
+        GST_SEEK_TYPE_SET, btstream->end_byte, &update);
     event = gst_event_new_segment (segment);
 #else
     event = gst_event_new_new_segment (FALSE, 1.0, GST_FORMAT_BYTES,
-        thiz->start_byte, thiz->end_byte, thiz->start_byte);
+        btstream->start_byte, btstream->end_byte, btstream->start_byte);
 #endif
-    gst_pad_push_event (GST_PAD (thiz), event);
-    thiz->pending_segment = FALSE;
+    gst_pad_push_event (GST_PAD (btstream), event);
+    btstream->pending_segment = FALSE;
   }
 
-  GST_DEBUG_OBJECT (thiz, "Pushing buffer, size: %d, file: %d, piece: %d",
-      ipc_data->size, thiz->idx, ipc_data->piece);
+  GST_DEBUG_OBJECT (btstream, "Pushing buffer, size: %d, file: %d, piece: %d",
+      ipc_data->size, btstream->idx, ipc_data->piece);
 
   /* keep track of the current piece */
-  thiz->current_piece = ipc_data->piece;
+  btstream->current_piece = ipc_data->piece;
 
-  ret = gst_pad_push (GST_PAD (thiz), buf);
+  ret = gst_pad_push (GST_PAD (btstream), buf);
   if (ret != GST_FLOW_OK) {
     send_eos = TRUE;
     if (ret == GST_FLOW_NOT_LINKED || ret <= GST_FLOW_UNEXPECTED) {
-      GST_ELEMENT_ERROR (demux, STREAM, FAILED,
+      GST_ELEMENT_ERROR (btdemux, STREAM, FAILED,
           ("Internal data flow error."),
           ("streaming task paused, reason %s (%d)", gst_flow_get_name (ret),
           ret));
     }
   }
 
+  // FIXME: ?
 #if 0
   /* send the end of segment in case we need to */
   if (ipc_data->piece == thiz->end_piece) {
@@ -299,43 +316,46 @@ gst_bt_demux_stream_push_loop (gpointer user_data)
 #endif
 
   /* send the EOS downstream, check that last push didnt trigger a new seek */
-  if (ipc_data->piece == thiz->last_piece && !thiz->pending_segment)
+  if (ipc_data->piece == btstream->last_piece && !btstream->pending_segment)
     send_eos = TRUE;
 
   if (send_eos) {
     GstEvent *eos;
 
     eos = gst_event_new_eos ();
-    GST_DEBUG_OBJECT (thiz, "Sending EOS on file %d", thiz->idx);
-    gst_pad_push_event (GST_PAD (thiz), eos);
-    gst_pad_pause_task (GST_PAD (thiz));
-    thiz->finished = TRUE;
+    GST_DEBUG_OBJECT (btstream, "Sending EOS on file %d", btstream->idx);
+    gst_pad_push_event (GST_PAD (btstream), eos);
+    gst_pad_pause_task (GST_PAD (btstream));
+    btstream->finished = TRUE;
   }
-  g_static_rec_mutex_unlock (thiz->lock);
+  gst_bt_demux_buffer_data_free (ipc_data);
+
+  GST_BT_DEMUX_STREAM_UNLOCK (btstream);
 
   /* send information about the whole element */
-  g_mutex_unlock (demux->streams_lock);
+  // GST_BT_DEMUX_STREAMS_UNLOCK(btdemux);
   if (update_buffering)
-    gst_bt_demux_send_buffering (demux, h);
+    gst_bt_demux_send_buffering (btdemux, h);
 
-  g_mutex_unlock (demux->streams_lock);
-  gst_bt_demux_buffer_data_free (ipc_data);
+  // FIXME: why is this unlock here?
+  // GST_BT_DEMUX_STREAMS_UNLOCK(btdemux);
 }
 
 
 static void
-gst_bt_demux_stream_update_buffering (GstBtDemuxStream * thiz,
+gst_bt_demux_stream_update_buffering_unlocked (GstBtDemuxStream * btstream,
     libtorrent::torrent_handle h, int max_pieces)
 {
   using namespace libtorrent;
+
   int i;
-  int start = thiz->current_piece + 1;
-  int end = thiz->current_piece + max_pieces;
+  int start = btstream->current_piece + 1;
+  int end = btstream->current_piece + max_pieces;
   int buffered_pieces = 0;
 
   /* do not overflow */
-  if (end > thiz->end_piece)
-    end = thiz->end_piece;
+  if (end > btstream->end_piece)
+    end = btstream->end_piece;
 
   /* count how many consecutive pieces have been downloaded */
   for (i = start; i <= end; i++) {
@@ -343,24 +363,24 @@ gst_bt_demux_stream_update_buffering (GstBtDemuxStream * thiz,
       buffered_pieces++;
   }
 
-  if (buffered_pieces > thiz->buffering_count)
-    buffered_pieces = thiz->buffering_count;
+  if (buffered_pieces > btstream->buffering_count)
+    buffered_pieces = btstream->buffering_count;
 
-  thiz->buffering = TRUE;
-  thiz->buffering_level = (buffered_pieces * 100) / thiz->buffering_count;
-  GST_DEBUG_OBJECT (thiz, "Buffering level %d (%d/%d)", thiz->buffering_level,
-      buffered_pieces, thiz->buffering_count);
+  btstream->buffering = TRUE;
+  btstream->buffering_level = (buffered_pieces * 100) / btstream->buffering_count;
+  GST_DEBUG_OBJECT (btstream, "Buffering level %d (%d/%d)", btstream->buffering_level,
+      buffered_pieces, btstream->buffering_count);
 }
 
 static void
-gst_bt_demux_stream_add_piece (GstBtDemuxStream * thiz,
+gst_bt_demux_stream_add_piece (GstBtDemuxStream * btstream,
     libtorrent::torrent_handle h, int piece, int max_pieces)
 {
   using namespace libtorrent;
 
-  GST_DEBUG_OBJECT (thiz, "Adding more pieces at %d, current: %d, "
-      "max: %d", piece, thiz->current_piece, max_pieces);
-  for (piece; piece <= thiz->end_piece; piece++) {
+  GST_DEBUG_OBJECT (btstream, "Adding more pieces at %d, current: %d, "
+      "max: %d", piece, btstream->current_piece, max_pieces);
+  for (piece; piece <= btstream->end_piece; piece++) {
     int priority;
 
     if (h.have_piece (piece))
@@ -375,34 +395,34 @@ gst_bt_demux_stream_add_piece (GstBtDemuxStream * thiz,
     priority = 7;
 
     h.piece_priority (piece, priority);
-    GST_DEBUG_OBJECT (thiz, "Requesting piece %d, prio: %d, current: %d, ",
-        piece, priority, thiz->current_piece);
+    GST_DEBUG_OBJECT (btstream, "Requesting piece %d, prio: %d, current: %d, ",
+        piece, priority, btstream->current_piece);
     break;
   }
 }
 
 static gboolean
-gst_bt_demux_stream_activate (GstBtDemuxStream * thiz,
+gst_bt_demux_stream_activate_unlocked (GstBtDemuxStream * btstream,
     libtorrent::torrent_handle h, int max_pieces)
 {
   gboolean ret = FALSE;
 
-  thiz->requested = TRUE;
-  thiz->current_piece = thiz->start_piece - 1;
-  thiz->pending_segment = TRUE;
+  btstream->requested = TRUE;
+  btstream->current_piece = btstream->start_piece - 1;
+  btstream->pending_segment = TRUE;
 
-  GST_DEBUG_OBJECT (thiz, "Activating stream '%s', start: %d, "
+  GST_DEBUG_OBJECT (btstream, "Activating stream '%s', start: %d, "
       "start_offset: %d, end: %d, end_offset: %d, current: %d",
-      GST_PAD_NAME (thiz), thiz->start_piece, thiz->start_offset,
-      thiz->end_piece, thiz->end_offset, thiz->current_piece);
+      GST_PAD_NAME (btstream), btstream->start_piece, btstream->start_offset,
+      btstream->end_piece, btstream->end_offset, btstream->current_piece);
 
-  if (h.have_piece (thiz->start_piece)) {
+  if (h.have_piece (btstream->start_piece)) {
     /* request the first non-downloaded piece */
-    if (thiz->start_piece != thiz->end_piece) {
+    if (btstream->start_piece != btstream->end_piece) {
       int i;
 
       for (i = 1; i < max_pieces; i++) {
-        gst_bt_demux_stream_add_piece (thiz, h, thiz->start_piece + i,
+        gst_bt_demux_stream_add_piece (btstream, h, btstream->start_piece + i,
             max_pieces);
       }
     }
@@ -411,11 +431,11 @@ gst_bt_demux_stream_activate (GstBtDemuxStream * thiz,
     int i;
 
     for (i = 0; i < max_pieces; i++) {
-      gst_bt_demux_stream_add_piece (thiz, h, thiz->start_piece + i,
+      gst_bt_demux_stream_add_piece (btstream, h, btstream->start_piece + i,
           max_pieces);
     }
     /* start the buffering */
-    gst_bt_demux_stream_start_buffering (thiz, h, max_pieces);
+    gst_bt_demux_stream_start_buffering (btstream, h, max_pieces);
     ret = TRUE;
   }
 
@@ -423,7 +443,7 @@ gst_bt_demux_stream_activate (GstBtDemuxStream * thiz,
 }
 
 static void
-gst_bt_demux_stream_info (GstBtDemuxStream * thiz,
+gst_bt_demux_stream_info (GstBtDemuxStream * btstream,
     libtorrent::torrent_handle h, gint * start_offset,
     gint * start_piece, gint * end_offset, gint * end_piece,
     gint64 * size)
@@ -434,7 +454,7 @@ gst_bt_demux_stream_info (GstBtDemuxStream * thiz,
   torrent_info ti = h.get_torrent_info ();
 
   piece_length = ti.piece_length ();
-  fe = ti.file_at (thiz->idx);
+  fe = ti.file_at (btstream->idx);
   if (start_piece)
     *start_piece = fe.offset / piece_length;
   if (start_offset)
@@ -448,10 +468,10 @@ gst_bt_demux_stream_info (GstBtDemuxStream * thiz,
 }
 
 static gboolean
-gst_bt_demux_stream_seek (GstBtDemuxStream * thiz, GstEvent * event)
+gst_bt_demux_stream_seek (GstBtDemuxStream * btstream, GstEvent * event)
 {
   using namespace libtorrent;
-  GstBtDemux *demux;
+  GstBtDemux *btdemux;
   GstFormat format;
   GstSeekFlags flags;
   GstSeekType start_type, stop_type;
@@ -465,10 +485,10 @@ gst_bt_demux_stream_seek (GstBtDemuxStream * thiz, GstEvent * event)
   gboolean update_buffering;
   gboolean ret = FALSE;
 
-  demux = GST_BT_DEMUX (gst_pad_get_parent (GST_PAD (thiz)));
-  s = (session *)demux->session;
+  btdemux = GST_BT_DEMUX (gst_pad_get_parent (GST_PAD (btstream)));
+  s = (session *)btdemux->session;
   h = s->get_torrents ()[0];
-  gst_object_unref (demux);
+  gst_object_unref (btdemux);
 
   /* get the piece length */
   torrent_info ti = h.get_torrent_info ();
@@ -484,7 +504,7 @@ gst_bt_demux_stream_seek (GstBtDemuxStream * thiz, GstEvent * event)
   if (rate < 0.0)
     goto beach;
 
-  gst_bt_demux_stream_info (thiz, h, &start_offset,
+  gst_bt_demux_stream_info (btstream, h, &start_offset,
       &start_piece, &end_offset, &end_piece, NULL);
 
   if (start < 0)
@@ -510,13 +530,13 @@ gst_bt_demux_stream_seek (GstBtDemuxStream * thiz, GstEvent * event)
   if (flags & GST_SEEK_FLAG_FLUSH) {
     GstEvent *flush_stop;
 
-    gst_pad_push_event (GST_PAD (thiz), gst_event_new_flush_start ());
+    gst_pad_push_event (GST_PAD (btstream), gst_event_new_flush_start ());
 #if HAVE_GST_1
     flush_stop = gst_event_new_flush_stop (TRUE);
 #else
     flush_stop = gst_event_new_flush_stop ();
 #endif
-    gst_pad_push_event (GST_PAD (thiz), flush_stop);
+    gst_pad_push_event (GST_PAD (btstream), flush_stop);
   } else {
     /* TODO we need to close the segment */
   }
@@ -525,43 +545,43 @@ gst_bt_demux_stream_seek (GstBtDemuxStream * thiz, GstEvent * event)
     GST_ERROR ("Segment seek");
   }
 
-  g_static_rec_mutex_lock (thiz->lock);
+  GST_BT_DEMUX_STREAM_LOCK (btstream);
 
   /* update the stream segment */
-  thiz->start_byte = start;
-  thiz->end_byte = stop,
+  btstream->start_byte = start;
+  btstream->end_byte = stop,
 
-  thiz->end_piece = start_piece + ((stop + start_offset) / piece_length);
-  thiz->end_offset = start_piece + ((stop + start_offset) % piece_length); 
+  btstream->end_piece = start_piece + ((stop + start_offset) / piece_length);
+  btstream->end_offset = start_piece + ((stop + start_offset) % piece_length); 
 
   tmp = start_piece;
-  thiz->start_piece = start_piece + ((start + start_offset) / piece_length);
-  thiz->start_offset = tmp + ((start + start_offset) % piece_length);
+  btstream->start_piece = start_piece + ((start + start_offset) / piece_length);
+  btstream->start_offset = tmp + ((start + start_offset) % piece_length);
 
-  GST_DEBUG_OBJECT (thiz, "Seeking to, start: %d, start_offset: %d, end: %d, "
-      "end_offset: %d", thiz->start_piece, thiz->start_offset,
-      thiz->end_piece, thiz->end_offset);
+  GST_DEBUG_OBJECT (btstream, "Seeking to, start: %d, start_offset: %d, end: %d, "
+      "end_offset: %d", btstream->start_piece, btstream->start_offset,
+      btstream->end_piece, btstream->end_offset);
 
   /* activate again this stream */
-  update_buffering = gst_bt_demux_stream_activate (thiz, h,
-      demux->buffer_pieces);
+  update_buffering = gst_bt_demux_stream_activate_unlocked (btstream, h,
+      btdemux->buffer_pieces);
+
   if (!update_buffering) {
     /* FIXME what if the demuxer is already buffering ? */
     /* start directly */
-    GST_DEBUG_OBJECT (thiz, "Starting stream '%s', reading piece %d, "
-        "current: %d", GST_PAD_NAME (thiz), thiz->start_piece,
-        thiz->current_piece);
-    h.read_piece (thiz->start_piece);
-    g_static_rec_mutex_unlock (thiz->lock);
+    GST_DEBUG_OBJECT (btstream, "Starting stream '%s', reading piece %d, "
+        "current: %d", GST_PAD_NAME (btstream), btstream->start_piece,
+        btstream->current_piece);
+    h.read_piece (btstream->start_piece);
   }
 
   ret = TRUE;
 
-  g_static_rec_mutex_unlock (thiz->lock);
-
   /* send the buffering if we need to */
   if (update_buffering)
-    gst_bt_demux_send_buffering (demux, h);
+    gst_bt_demux_send_buffering (btdemux, h);
+
+  GST_BT_DEMUX_STREAM_UNLOCK(btstream);
 
 beach:
   return ret;
@@ -570,17 +590,17 @@ beach:
 static gboolean
 gst_bt_demux_stream_event (GstPad * pad, GstObject * object, GstEvent * event)
 {
-  GstBtDemuxStream *thiz;
+  GstBtDemuxStream *btstream;
   gboolean ret = FALSE;
 
-  thiz = GST_BT_DEMUX_STREAM (pad);
+  btstream = GST_BT_DEMUX_STREAM (pad);
 
-  GST_DEBUG_OBJECT (thiz, "Event %s", GST_EVENT_TYPE_NAME (event));
+  GST_DEBUG_OBJECT (btstream, "Event %s", GST_EVENT_TYPE_NAME (event));
 
   switch (GST_EVENT_TYPE (event)) {
     case GST_EVENT_SEEK:
       {
-        ret = gst_bt_demux_stream_seek (thiz, event);
+        ret = gst_bt_demux_stream_seek (btstream, event);
         break;
       }
   }
@@ -592,14 +612,14 @@ static gboolean
 gst_bt_demux_stream_query (GstPad * pad, GstObject * object, GstQuery * query)
 {
   using namespace libtorrent;
-  GstBtDemux *demux;
-  GstBtDemuxStream *thiz;
+  GstBtDemux *btdemux;
+  GstBtDemuxStream *btstream;
   gboolean ret = FALSE;
 
-  thiz = GST_BT_DEMUX_STREAM (pad);
-  demux = GST_BT_DEMUX (object);
+  btstream = GST_BT_DEMUX_STREAM (pad);
+  btdemux = GST_BT_DEMUX (object);
 
-  GST_DEBUG_OBJECT (thiz, "Quering %s", GST_QUERY_TYPE_NAME (query));
+  GST_DEBUG_OBJECT (btstream, "Quering %s", GST_QUERY_TYPE_NAME (query));
 
   switch (GST_QUERY_TYPE (query)) {
     case GST_QUERY_SEEKING:
@@ -620,12 +640,12 @@ gst_bt_demux_stream_query (GstPad * pad, GstObject * object, GstQuery * query)
         GstFormat fmt;
         gint64 bytes;
 
-        s = (session *)demux->session;
+        s = (session *)btdemux->session;
         h = s->get_torrents ()[0];
 
         gst_query_parse_duration (query, &fmt, NULL);
         if (fmt == GST_FORMAT_BYTES) {
-          gst_bt_demux_stream_info (thiz, h, NULL, NULL, NULL, NULL, &bytes);
+          gst_bt_demux_stream_info (btstream, h, NULL, NULL, NULL, NULL, &bytes);
           gst_query_set_duration (query, GST_FORMAT_BYTES, bytes);
           ret = TRUE;
         }
@@ -676,23 +696,21 @@ gst_bt_demux_stream_query_simple (GstPad * pad, GstQuery * query)
 static void
 gst_bt_demux_stream_dispose (GObject * object)
 {
-  GstBtDemuxStream *thiz;
+  GstBtDemuxStream *btstream;
 
-  thiz = GST_BT_DEMUX_STREAM (object);
+  btstream = GST_BT_DEMUX_STREAM (object);
 
-  if (thiz->path) {
-    g_free (thiz->path);
-  }
+  GST_DEBUG_OBJECT (btstream, "Disposing");
 
-  if (thiz->ipc) {
-    g_async_queue_unref (thiz->ipc);
-    thiz->ipc = NULL;
-  }
+  if (btstream->path)
+    g_free (btstream->path);
 
-  g_static_rec_mutex_free (thiz->lock);
-  g_free (thiz->lock);
+  if (btstream->ipc)
+    g_async_queue_unref (btstream->ipc);
 
-  GST_DEBUG_OBJECT (thiz, "Disposing");
+  btstream->ipc = NULL;
+
+  GST_BT_DEMUX_STREAM_MUTEX_CLEAR(btstream);
 
   G_OBJECT_CLASS (gst_bt_demux_stream_parent_class)->dispose (object);
 }
@@ -711,25 +729,24 @@ gst_bt_demux_stream_class_init (GstBtDemuxStreamClass * klass)
 }
 
 static void
-gst_bt_demux_stream_init (GstBtDemuxStream * thiz)
+gst_bt_demux_stream_init (GstBtDemuxStream * btstream)
 {
-  thiz->lock = g_new (GStaticRecMutex, 1);
-  g_static_rec_mutex_init (thiz->lock);
+  GST_BT_DEMUX_STREAM_MUTEX_INIT(btstream);
 
 #if HAVE_GST_1
-  gst_pad_set_event_function (GST_PAD (thiz),
+  gst_pad_set_event_function (GST_PAD (btstream),
       GST_DEBUG_FUNCPTR (gst_bt_demux_stream_event));
-  gst_pad_set_query_function (GST_PAD (thiz),
+  gst_pad_set_query_function (GST_PAD (btstream),
       GST_DEBUG_FUNCPTR (gst_bt_demux_stream_query));
 #else
-  gst_pad_set_event_function (GST_PAD (thiz),
+  gst_pad_set_event_function (GST_PAD (btstream),
       GST_DEBUG_FUNCPTR (gst_bt_demux_stream_event_simple));
-  gst_pad_set_query_function (GST_PAD (thiz),
+  gst_pad_set_query_function (GST_PAD (btstream),
       GST_DEBUG_FUNCPTR (gst_bt_demux_stream_query_simple));
 #endif
 
   /* our ipc */
-  thiz->ipc = g_async_queue_new_full (
+  btstream->ipc = g_async_queue_new_full (
       (GDestroyNotify)gst_bt_demux_buffer_data_free);
 }
 
@@ -774,13 +791,12 @@ static GstFlowReturn
 gst_bt_demux_sink_chain (GstPad * pad, GstObject * object,
     GstBuffer * buffer)
 {
-  GstBtDemux *thiz;
-  GstFlowReturn ret;
+  GstBtDemux *btdemux;
 
-  thiz = GST_BT_DEMUX (object);
+  btdemux = GST_BT_DEMUX (object);
 
-  GST_DEBUG_OBJECT (thiz, "Received buffer");
-  gst_adapter_push (thiz->adapter, gst_buffer_ref (buffer));
+  GST_DEBUG_OBJECT (btdemux, "Received buffer");
+  gst_adapter_push (btdemux->adapter, gst_buffer_ref (buffer));
 
   return GST_FLOW_OK;
 }
@@ -790,26 +806,28 @@ static gboolean
 gst_bt_demux_sink_event (GstPad * pad, GstObject * object,
     GstEvent * event)
 {
-  GstBtDemux *thiz;
-  GstPad *peer;
+  GstBtDemux *btdemux;
+  // GstPad *peer;
   GstBuffer *buf;
   GstMessage *message;
   gint len;
-  gboolean res = TRUE;
+  gboolean res;
   libtorrent::torrent_info *torrent_info;
   guint8 *data;
 #if HAVE_GST_1
   GstMapInfo mi;
 #endif
 
+  res = TRUE;
+
   if (GST_EVENT_TYPE (event) != GST_EVENT_EOS)
     goto beach;
 
-  thiz = GST_BT_DEMUX (object);
+  btdemux = GST_BT_DEMUX (object);
 
-  GST_DEBUG_OBJECT (thiz, "Received EOS");
-  len = gst_adapter_available (thiz->adapter);
-  buf = gst_adapter_take_buffer (thiz->adapter, len);
+  GST_DEBUG_OBJECT (btdemux, "Received EOS");
+  len = gst_adapter_available (btdemux->adapter);
+  buf = gst_adapter_take_buffer (btdemux->adapter, len);
 
 #if HAVE_GST_1
   gst_buffer_map (buf, &mi, GST_MAP_READ);
@@ -831,10 +849,10 @@ gst_bt_demux_sink_event (GstPad * pad, GstObject * object,
     libtorrent::session *session;
     libtorrent::add_torrent_params tp;
 
-    tp.ti = torrent_info;
-    tp.save_path = thiz->temp_location;
+    tp.ti = boost::shared_ptr<libtorrent::torrent_info>(torrent_info);
+    tp.save_path = btdemux->temp_location;
 
-    session = (libtorrent::session *)thiz->session;
+    session = (libtorrent::session *)btdemux->session;
     session->async_add_torrent (tp);
   } else {
     /* TODO Send an error message */
@@ -913,7 +931,7 @@ gst_bt_demux_cclosure_marshal_BOXED__INT (GClosure     * closure,
 
 
 static GstTagList *
-gst_bt_demux_get_stream_tags (GstBtDemux * thiz, gint stream)
+gst_bt_demux_get_stream_tags (GstBtDemux * btdemux, gint stream)
 {
   using namespace libtorrent;
   session *s;
@@ -921,11 +939,11 @@ gst_bt_demux_get_stream_tags (GstBtDemux * thiz, gint stream)
   std::vector<torrent_handle> torrents;
   int i;
 
-  if (!thiz->streams)
+  if (!btdemux->streams)
     return NULL;
 
   /* get the torrent_info */
-  s = (session *)thiz->session;
+  s = (session *)btdemux->session;
   torrents = s->get_torrents ();
 
   torrent_info ti = torrents[0].get_torrent_info ();
@@ -942,18 +960,18 @@ gst_bt_demux_get_stream_tags (GstBtDemux * thiz, gint stream)
 }
 
 static GSList *
-gst_bt_demux_get_policy_streams (GstBtDemux * thiz)
+gst_bt_demux_get_policy_streams (GstBtDemux * btdemux)
 {
   using namespace libtorrent;
   GSList *ret = NULL;
 
-  switch (thiz->policy) {
+  switch (btdemux->policy) {
     case GST_BT_DEMUX_SELECTOR_POLICY_ALL:
       {
         GSList *walk;
 
         /* copy the streams list */
-        for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+        for (walk = btdemux->streams; walk; walk = g_slist_next (walk)) {
           GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
           ret = g_slist_append (ret, gst_object_ref (stream));
         }
@@ -968,7 +986,7 @@ gst_bt_demux_get_policy_streams (GstBtDemux * thiz)
         int i;
         int index = 0;
 
-        s = (session *)thiz->session;
+        s = (session *)btdemux->session;
         torrents = s->get_torrents ();
         if (torrents.size () < 1)
           break;
@@ -989,7 +1007,7 @@ gst_bt_demux_get_policy_streams (GstBtDemux * thiz)
         }
 
         ret = g_slist_append (ret, gst_object_ref (g_slist_nth_data (
-            thiz->streams, index)));
+            btdemux->streams, index)));
       }
 
     default:
@@ -1000,7 +1018,7 @@ gst_bt_demux_get_policy_streams (GstBtDemux * thiz)
 }
 
 static void
-gst_bt_demux_check_no_more_pads (GstBtDemux * thiz)
+gst_bt_demux_check_no_more_pads (GstBtDemux * btdemux)
 {
   GSList *walk;
   gboolean send = TRUE;
@@ -1008,7 +1026,7 @@ gst_bt_demux_check_no_more_pads (GstBtDemux * thiz)
   /* whenever every requested stream has an active pad inform about the
    * no more pads
    */
-  for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+  for (walk = btdemux->streams; walk; walk = g_slist_next (walk)) {
     GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
 
     if (stream->requested && !gst_pad_is_active (GST_PAD (stream)))
@@ -1018,13 +1036,13 @@ gst_bt_demux_check_no_more_pads (GstBtDemux * thiz)
   }
 
   if (send) {
-    GST_DEBUG_OBJECT (thiz, "Sending no more pads");
-    gst_element_no_more_pads (GST_ELEMENT (thiz));
+    GST_DEBUG_OBJECT (btdemux, "Sending no more pads");
+    gst_element_no_more_pads (GST_ELEMENT (btdemux));
   }
 }
 
 static void
-gst_bt_demux_send_buffering (GstBtDemux * thiz, libtorrent::torrent_handle h)
+gst_bt_demux_send_buffering (GstBtDemux * btdemux, libtorrent::torrent_handle h)
 {
   using namespace libtorrent;
   GSList *walk;
@@ -1033,18 +1051,18 @@ gst_bt_demux_send_buffering (GstBtDemux * thiz, libtorrent::torrent_handle h)
   gboolean start_pushing = FALSE;
 
   /* generate the real buffering level */
-  for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+  for (walk = btdemux->streams; walk; walk = g_slist_next (walk)) {
     GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
 
-    g_static_rec_mutex_lock (stream->lock);
+    GST_BT_DEMUX_STREAM_LOCK(stream);
 
     if (!stream->requested) {
-      g_static_rec_mutex_unlock (stream->lock);
+      GST_BT_DEMUX_STREAM_UNLOCK(stream);
       continue;
     }
 
     if (!stream->buffering) {
-      g_static_rec_mutex_unlock (stream->lock);
+      GST_BT_DEMUX_STREAM_UNLOCK(stream);
       continue;
     }
 
@@ -1055,47 +1073,47 @@ gst_bt_demux_send_buffering (GstBtDemux * thiz, libtorrent::torrent_handle h)
       stream->buffering_level = 0;
     }
     num_buffering++;
-    g_static_rec_mutex_unlock (stream->lock);
+    GST_BT_DEMUX_STREAM_UNLOCK(stream);
   }
 
   if (num_buffering) {
     gdouble level = ((gdouble) buffering) / num_buffering;
-    if (thiz->buffering) {
-      gst_element_post_message (GST_ELEMENT_CAST (thiz),
-          gst_message_new_buffering (GST_OBJECT_CAST (thiz), level));
+    if (btdemux->buffering) {
+      gst_element_post_message (GST_ELEMENT_CAST (btdemux),
+          gst_message_new_buffering (GST_OBJECT_CAST (btdemux), level));
       if (level >= 100.0) {
-        thiz->buffering = FALSE;
+        btdemux->buffering = FALSE;
         start_pushing = TRUE;
       }
     } else if (level < 100.0) {
-      gst_element_post_message (GST_ELEMENT_CAST (thiz),
-          gst_message_new_buffering (GST_OBJECT_CAST (thiz), level));
-      thiz->buffering = TRUE;
+      gst_element_post_message (GST_ELEMENT_CAST (btdemux),
+          gst_message_new_buffering (GST_OBJECT_CAST (btdemux), level));
+      btdemux->buffering = TRUE;
     }
   }
+
+  if (!start_pushing)
+      return;
 
   /* start pushing buffers on every stream */
-  if (start_pushing) {
-    for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+    for (walk = btdemux->streams; walk; walk = g_slist_next (walk)) {
       GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
 
-      g_static_rec_mutex_lock (stream->lock);
-      if (!stream->requested) {
-        g_static_rec_mutex_unlock (stream->lock);
-        continue;
+      GST_BT_DEMUX_STREAM_LOCK(stream);
+
+      if (stream->requested) {
+          GST_DEBUG_OBJECT (btdemux, "Buffering finished, reading piece %d"
+                  ", current: %d", stream->current_piece + 1,
+                  stream->current_piece);
+          h.read_piece (stream->current_piece + 1);
       }
 
-      GST_DEBUG_OBJECT (thiz, "Buffering finished, reading piece %d"
-          ", current: %d", stream->current_piece + 1,
-          stream->current_piece);
-      h.read_piece (stream->current_piece + 1);
-      g_static_rec_mutex_unlock (stream->lock);
+      GST_BT_DEMUX_STREAM_UNLOCK(stream);
     }
-  }
 }
 
 static void
-gst_bt_demux_activate_streams (GstBtDemux * thiz)
+gst_bt_demux_activate_streams (GstBtDemux * btdemux)
 {
   using namespace libtorrent;
   GSList *streams = NULL;
@@ -1103,84 +1121,86 @@ gst_bt_demux_activate_streams (GstBtDemux * thiz)
   session *s;
   torrent_handle h;
   gboolean update_buffering = FALSE;
-
-
-  g_mutex_lock (thiz->streams_lock);
-  if (!thiz->streams) {
-    g_mutex_unlock (thiz->streams_lock);
+  
+  GST_BT_DEMUX_STREAMS_LOCK(btdemux);
+  if (!btdemux->streams) {
+    GST_BT_DEMUX_STREAMS_UNLOCK(btdemux);
     return;
   }
 
-  if (!thiz->requested_streams) {
+  if (!btdemux->requested_streams) {
     /* use the policy */
-    streams = gst_bt_demux_get_policy_streams (thiz);
+    streams = gst_bt_demux_get_policy_streams (btdemux);
   } else {
     /* TODO use the value */
   }
 
-  s = (session *)thiz->session;
+  s = (session *)btdemux->session;
   h = s->get_torrents ()[0];
 
   /* mark every stream as not requested */
-  for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+  for (walk = btdemux->streams; walk; walk = g_slist_next (walk)) {
     GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
 
     /* TODO set the priority to 0 on every piece */
     /* Actually inactivate it? */
-    g_static_rec_mutex_lock (stream->lock);
+    GST_BT_DEMUX_STREAM_LOCK(stream);
     stream->requested = FALSE;
-    g_static_rec_mutex_unlock (stream->lock);
+    GST_BT_DEMUX_STREAM_UNLOCK(stream);
   }
 
   /* prioritize the first piece of every requested stream */
   for (walk = streams; walk; walk = g_slist_next (walk)) {
     GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
 
-    g_static_rec_mutex_lock (stream->lock);
-    GST_DEBUG_OBJECT (thiz, "Requesting stream %s", GST_PAD_NAME (stream));
-    update_buffering |= gst_bt_demux_stream_activate (stream, h,
-        thiz->buffer_pieces);
-    g_static_rec_mutex_unlock (stream->lock);
+    GST_BT_DEMUX_STREAM_LOCK(stream);
+
+    GST_DEBUG_OBJECT (btdemux, "Requesting stream %s", GST_PAD_NAME (stream));
+    update_buffering |= gst_bt_demux_stream_activate_unlocked (stream, h,
+        btdemux->buffer_pieces);
+    GST_BT_DEMUX_STREAM_UNLOCK(stream);
   }
 
   /* wait for the buffering before reading pieces */
   if (update_buffering) {
-    gst_bt_demux_send_buffering (thiz, h);
+    gst_bt_demux_send_buffering (btdemux, h);
   } else {
     /* start directly */
     for (walk = streams; walk; walk = g_slist_next (walk)) {
       GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
 
-      g_static_rec_mutex_lock (stream->lock);
-      GST_DEBUG_OBJECT (thiz, "Starting stream '%s', reading piece %d, "
+      GST_BT_DEMUX_STREAM_LOCK(stream);
+
+      GST_DEBUG_OBJECT (btdemux, "Starting stream '%s', reading piece %d, "
           "current: %d", GST_PAD_NAME (stream), stream->start_piece,
           stream->current_piece);
       h.read_piece (stream->start_piece);
-      g_static_rec_mutex_unlock (stream->lock);
+
+      GST_BT_DEMUX_STREAM_UNLOCK(stream);
     }
   }
 
   g_slist_free_full (streams, gst_object_unref);
-  g_mutex_unlock (thiz->streams_lock);
+  GST_BT_DEMUX_STREAMS_UNLOCK(btdemux);
 }
 
 
 /* thread reading messages from libtorrent */
 static gboolean
-gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
+gst_bt_demux_handle_alert (GstBtDemux * btdemux, const libtorrent::alert * a)
 {
   using namespace libtorrent;
   gboolean ret = FALSE;
 
-  GST_LOG_OBJECT (thiz, "Received alert '%s'", a->what());
+  GST_LOG_OBJECT (btdemux, "Received alert '%s'", a->what());
 
   switch (a->type()) {
     case add_torrent_alert::alert_type:
       {
-        add_torrent_alert *p = alert_cast<add_torrent_alert>(a);
+        const add_torrent_alert *p = alert_cast<add_torrent_alert>(a);
 
         if (p->error) {
-          GST_ELEMENT_ERROR (thiz, STREAM, FAILED,
+          GST_ELEMENT_ERROR (btdemux, STREAM, FAILED,
               ("Error while adding the torrent."),
               ("libtorrent says %s", p->error.message ().c_str ()));
           ret = TRUE;
@@ -1189,8 +1209,8 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           torrent_handle h = p->handle;
           int i;
 
-          GST_INFO_OBJECT (thiz, "Start downloading");
-          GST_DEBUG_OBJECT (thiz, "num files: %d, num pieces: %d, "
+          GST_INFO_OBJECT (btdemux, "Start downloading");
+          GST_DEBUG_OBJECT (btdemux, "num files: %d, num pieces: %d, "
               "piece length: %d", p->params.ti->num_files (),
               p->params.ti->num_pieces (), p->params.ti->piece_length ());
 
@@ -1223,14 +1243,14 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
             stream->start_byte = 0;
             stream->last_piece = stream->end_piece;
 
-            GST_INFO_OBJECT (thiz, "Adding stream %s for file '%s', "
+            GST_INFO_OBJECT (btdemux, "Adding stream %s for file '%s', "
                 " start_piece: %d, start_offset: %d, end_piece: %d, "
                 "end_offset: %d", GST_PAD_NAME (stream), stream->path,
                 stream->start_piece, stream->start_offset, stream->end_piece,
                 stream->end_offset);
 
             /* add it to our list of streams */
-            thiz->streams = g_slist_append (thiz->streams, stream);
+            btdemux->streams = g_slist_append (btdemux->streams, stream);
           }
 
           /* mark every piece to none-priority */
@@ -1239,7 +1259,7 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           }
 
           /* inform that we do know the available streams now */
-          g_signal_emit (thiz, gst_bt_demux_signals[SIGNAL_STREAMS_CHANGED], 0);
+          g_signal_emit (btdemux, gst_bt_demux_signals[SIGNAL_STREAMS_CHANGED], 0);
 
           /* make sure to download sequentially */
           h.set_sequential_download (true);
@@ -1250,36 +1270,38 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
     case torrent_checked_alert::alert_type:
       {
         /* time to activate the streams */
-        gst_bt_demux_activate_streams (thiz);
+        gst_bt_demux_activate_streams (btdemux);
         break;
       }
 
     case piece_finished_alert::alert_type:
       {
         GSList *walk;
-        piece_finished_alert *p = alert_cast<piece_finished_alert>(a);
+        const piece_finished_alert *p = alert_cast<piece_finished_alert>(a);
         torrent_handle h = p->handle;
         torrent_status s = h.status();
         gboolean update_buffering = FALSE;
 
-        GST_DEBUG_OBJECT (thiz, "Piece %d completed (down: %d kb/s, "
+        GST_DEBUG_OBJECT (btdemux, "Piece %d completed (down: %d kb/s, "
             "up: %d kb/s, peers: %d)", p->piece_index, s.download_rate / 1000,
             s.upload_rate  / 1000, s.num_peers);
 
-        g_mutex_lock (thiz->streams_lock);
+        GST_BT_DEMUX_STREAMS_LOCK(btdemux);
+
         /* read the piece once it is finished and send downstream in order */
-        for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+        for (walk = btdemux->streams; walk; walk = g_slist_next (walk)) {
           GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
 
-          g_static_rec_mutex_lock (stream->lock);
+          GST_BT_DEMUX_STREAM_LOCK(stream);
+
           if (p->piece_index < stream->start_piece ||
               p->piece_index > stream->end_piece) {
-            g_static_rec_mutex_unlock (stream->lock);
+              GST_BT_DEMUX_STREAM_UNLOCK(stream);
             continue;
           }
 
           if (!stream->requested) {
-            g_static_rec_mutex_unlock (stream->lock);
+              GST_BT_DEMUX_STREAM_UNLOCK(stream);
             continue;
           }
 
@@ -1288,38 +1310,42 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
 
           /* update the buffering */
           if (stream->buffering) {
-            gst_bt_demux_stream_update_buffering (stream, h, thiz->buffer_pieces);
+            gst_bt_demux_stream_update_buffering_unlocked (stream, h, btdemux->buffer_pieces);
             update_buffering |= TRUE;
           }
 
           /* download the next piece */
           gst_bt_demux_stream_add_piece (stream, h, p->piece_index + 1,
-              thiz->buffer_pieces);
-          g_static_rec_mutex_unlock (stream->lock);
+              btdemux->buffer_pieces);
+
+          GST_BT_DEMUX_STREAM_UNLOCK(stream);
         }
 
         if (update_buffering)
-          gst_bt_demux_send_buffering (thiz, h);
+          gst_bt_demux_send_buffering (btdemux, h);
 
-        g_mutex_unlock (thiz->streams_lock);
+        GST_BT_DEMUX_STREAMS_UNLOCK(btdemux);
         break;
       }
     case read_piece_alert::alert_type:
       {
         GSList *walk;
-        read_piece_alert *p = alert_cast<read_piece_alert>(a);
+        const read_piece_alert *p = alert_cast<read_piece_alert>(a);
         gboolean topology_changed = FALSE;
 
-        g_mutex_lock (thiz->streams_lock);
+        GST_BT_DEMUX_STREAMS_LOCK(btdemux);
+
         /* read the piece once it is finished and send downstream in order */
-        for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+        for (walk = btdemux->streams; walk; walk = g_slist_next (walk)) {
           GstBtDemuxBufferData *ipc_data;
           GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
 
-          g_static_rec_mutex_lock (stream->lock);
+          GST_BT_DEMUX_STREAM_LOCK(stream);
+
           if (p->piece < stream->start_piece ||
               p->piece > stream->end_piece) {
-            g_static_rec_mutex_unlock (stream->lock);
+
+            GST_BT_DEMUX_STREAM_UNLOCK(stream);
             continue;
           }
 
@@ -1327,25 +1353,26 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           if (gst_pad_is_active (GST_PAD (stream)) && !stream->requested) {
             topology_changed = TRUE;
             gst_pad_set_active (GST_PAD (stream), FALSE);
-            gst_element_remove_pad (GST_ELEMENT (thiz), GST_PAD (stream));
+            gst_element_remove_pad (GST_ELEMENT (btdemux), GST_PAD (stream));
             gst_pad_stop_task (GST_PAD (stream));
-            g_static_rec_mutex_unlock (stream->lock);
+
+            GST_BT_DEMUX_STREAM_UNLOCK(stream);
             continue;
           }
 
           if (!stream->requested) {
-            g_static_rec_mutex_unlock (stream->lock);
+            GST_BT_DEMUX_STREAM_UNLOCK(stream);
             continue;
           }
 
           /* create the pad if needed */
           if (!gst_pad_is_active (GST_PAD (stream))) {
             gst_pad_set_active (GST_PAD (stream), TRUE);
-            gst_element_add_pad (GST_ELEMENT (thiz), GST_PAD (
+            gst_element_add_pad (GST_ELEMENT (btdemux), GST_PAD (
                 gst_object_ref (stream)));
             topology_changed = TRUE;
 
-            if (thiz->typefind) {
+            if (btdemux->typefind) {
               GstTypeFindProbability prob;
               GstCaps *caps;
               GstBuffer *buf;
@@ -1353,7 +1380,7 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
               buf = gst_bt_demux_buffer_new (p->buffer, p->piece, p->size,
                   stream);
 
-              caps = gst_type_find_helper_for_buffer (GST_OBJECT (thiz), buf, &prob);
+              caps = gst_type_find_helper_for_buffer (GST_OBJECT (btdemux), buf, &prob);
               gst_buffer_unref (buf);
 
               if (caps) {
@@ -1378,12 +1405,13 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
           gst_pad_start_task (GST_PAD (stream), gst_bt_demux_stream_push_loop,
               stream);
 #endif
-          g_static_rec_mutex_unlock (stream->lock);
+          GST_BT_DEMUX_STREAM_UNLOCK(stream);
         }
 
         if (topology_changed)
-          gst_bt_demux_check_no_more_pads (thiz);
-        g_mutex_unlock (thiz->streams_lock);
+          gst_bt_demux_check_no_more_pads (btdemux);
+
+        GST_BT_DEMUX_STREAMS_UNLOCK(btdemux);
       }
       break;
 
@@ -1395,7 +1423,7 @@ gst_bt_demux_handle_alert (GstBtDemux * thiz, libtorrent::alert * a)
     case file_completed_alert::alert_type:
       /* TODO send the EOS downstream */
       /* TODO mark ourselves as done */
-      /* TODO quit the main demux loop */
+      /* TODO quit the main btdemux loop */
       break;
 
     default:
@@ -1409,46 +1437,44 @@ static void
 gst_bt_demux_loop (gpointer user_data)
 {
   using namespace libtorrent;
-  GstBtDemux *thiz;
-  
-  thiz = GST_BT_DEMUX (user_data);
-  while (!thiz->finished) {
-    session *s;
-    s = (session *)thiz->session;
 
+  GstBtDemux *btdemux;
+  session *s;
+  
+  btdemux = GST_BT_DEMUX (user_data);
+  s = (session *)btdemux->session;
+
+  while (!btdemux->finished) {
     if (s->wait_for_alert (libtorrent::seconds(10)) != NULL) {
-      std::deque<alert*> alerts;
+      std::vector<alert*> alerts;
       s->pop_alerts(&alerts);
 
       /* handle every alert */
-      for (std::deque<libtorrent::alert*>::iterator i = alerts.begin(),
-          end(alerts.end()); i != end; ++i) {
-
-        if (!thiz->finished)
-          thiz->finished = gst_bt_demux_handle_alert (thiz, *i);
-        delete *i;
+      for (const alert * a : alerts) {
+          if (!btdemux->finished)
+              btdemux->finished = gst_bt_demux_handle_alert (btdemux, a);
       }
-      alerts.clear();
     }
   }
-  gst_task_stop (thiz->task);
+
+  gst_task_stop (btdemux->task);
 }
 
 static void
-gst_bt_demux_task_setup (GstBtDemux * thiz)
+gst_bt_demux_task_setup (GstBtDemux * btdemux)
 {
   /* to pop from the libtorrent async system */
 #if HAVE_GST_1
-  thiz->task = gst_task_new (gst_bt_demux_loop, thiz, NULL);
+  btdemux->task = gst_task_new (gst_bt_demux_loop, btdemux, NULL);
 #else
-  thiz->task = gst_task_create (gst_bt_demux_loop, thiz);
+  btdemux->task = gst_task_create (gst_bt_demux_loop, btdemux);
 #endif
-  gst_task_set_lock (thiz->task, &thiz->task_lock);
-  gst_task_start (thiz->task);
+  gst_task_set_lock (btdemux->task, &btdemux->task_lock);
+  gst_task_start (btdemux->task);
 }
 
 static void
-gst_bt_demux_task_cleanup (GstBtDemux * thiz)
+gst_bt_demux_task_cleanup (GstBtDemux * btdemux)
 {
   using namespace libtorrent;
   GSList *walk;
@@ -1456,8 +1482,8 @@ gst_bt_demux_task_cleanup (GstBtDemux * thiz)
   std::vector<torrent_handle> torrents;
 
   /* pause every task */
-  g_mutex_lock (thiz->streams_lock);
-  for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+  GST_BT_DEMUX_STREAMS_LOCK(btdemux);
+  for (walk = btdemux->streams; walk; walk = g_slist_next (walk)) {
     GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
     GstBtDemuxBufferData *ipc_data;
 
@@ -1466,14 +1492,14 @@ gst_bt_demux_task_cleanup (GstBtDemux * thiz)
     g_async_queue_push (stream->ipc, ipc_data);
     gst_pad_stop_task (GST_PAD (stream));
   }
-  g_mutex_unlock (thiz->streams_lock);
+  GST_BT_DEMUX_STREAMS_UNLOCK(btdemux);
 
-  s = (session *)thiz->session;
+  s = (session *)btdemux->session;
   torrents = s->get_torrents ();
 
   if (torrents.size () < 1) {
     /* nothing added, stop the task directly */
-    thiz->finished = TRUE;
+    btdemux->finished = TRUE;
   } else {
     torrent_handle h;
     h = torrents[0];
@@ -1483,54 +1509,54 @@ gst_bt_demux_task_cleanup (GstBtDemux * thiz)
   /* given that the pads are removed on the parent class at the paused
    * to ready state, we need to exit the task and wait for it
    */
-  if (thiz->task) { 
-    gst_task_stop (thiz->task);
-    gst_task_join (thiz->task);
-    gst_object_unref (thiz->task);
-    thiz->task = NULL;
+  if (btdemux->task) { 
+    gst_task_stop (btdemux->task);
+    gst_task_join (btdemux->task);
+    gst_object_unref (btdemux->task);
+    btdemux->task = NULL;
   }
 }
 
 static void
-gst_bt_demux_cleanup (GstBtDemux * thiz)
+gst_bt_demux_cleanup (GstBtDemux * btdemux)
 {
   /* remove every pad reference */
-  if (thiz->streams) {
+  if (btdemux->streams) {
     /* finally remove the files if we need to */
-    if (thiz->temp_remove) {
+    if (btdemux->temp_remove) {
       GSList *walk;
 
-      for (walk = thiz->streams; walk; walk = g_slist_next (walk)) {
+      for (walk = btdemux->streams; walk; walk = g_slist_next (walk)) {
         GstBtDemuxStream *stream = GST_BT_DEMUX_STREAM (walk->data);
         gchar *to_remove;
 
-        to_remove = g_build_path (G_DIR_SEPARATOR_S, thiz->temp_location,
+        to_remove = g_build_path (G_DIR_SEPARATOR_S, btdemux->temp_location,
             stream->path, NULL);
         g_remove (to_remove);
         g_free (to_remove);
       }
     }
 
-    g_slist_free_full (thiz->streams, gst_object_unref);
-    thiz->streams = NULL;
+    g_slist_free_full (btdemux->streams, gst_object_unref);
+    btdemux->streams = NULL;
   }
 }
 
 static GstStateChangeReturn
 gst_bt_demux_change_state (GstElement * element, GstStateChange transition)
 {
-  GstBtDemux * thiz;
+  GstBtDemux * btdemux;
   GstStateChangeReturn ret;
 
-  thiz = GST_BT_DEMUX (element);
+  btdemux = GST_BT_DEMUX (element);
 
   switch (transition) {
     case GST_STATE_CHANGE_READY_TO_PAUSED:
-      gst_bt_demux_task_setup (thiz);
+      gst_bt_demux_task_setup (btdemux);
       break;
 
     case GST_STATE_CHANGE_PAUSED_TO_READY:
-      gst_bt_demux_task_cleanup (thiz);
+      gst_bt_demux_task_cleanup (btdemux);
       break;
 
     default:
@@ -1541,7 +1567,7 @@ gst_bt_demux_change_state (GstElement * element, GstStateChange transition)
 
   switch (transition) {
     case GST_STATE_CHANGE_PAUSED_TO_READY:
-      gst_bt_demux_cleanup (thiz);
+      gst_bt_demux_cleanup (btdemux);
       break;
 
     case GST_STATE_CHANGE_READY_TO_NULL:
@@ -1557,31 +1583,29 @@ gst_bt_demux_change_state (GstElement * element, GstStateChange transition)
 static void
 gst_bt_demux_dispose (GObject * object)
 {
-  GstBtDemux *thiz;
+  GstBtDemux *btdemux;
 
-  thiz = GST_BT_DEMUX (object);
+  btdemux = GST_BT_DEMUX (object);
 
-  GST_DEBUG_OBJECT (thiz, "Disposing");
+  GST_DEBUG_OBJECT (btdemux, "Disposing");
 
-  gst_bt_demux_task_cleanup (thiz);
-  gst_bt_demux_cleanup (thiz);
+  gst_bt_demux_task_cleanup (btdemux);
+  gst_bt_demux_cleanup (btdemux);
 
-  if (thiz->session) {
+  if (btdemux->session) {
     libtorrent::session *session;
 
-    session = (libtorrent::session *)thiz->session;
+    session = (libtorrent::session *)btdemux->session;
     delete (session);
-    thiz->session = NULL;
+    btdemux->session = NULL;
   }
 
-  if (thiz->adapter) {
-    g_object_unref (thiz->adapter);
-    thiz->adapter = NULL;
+  if (btdemux->adapter) {
+    g_object_unref (btdemux->adapter);
+    btdemux->adapter = NULL;
   }
 
-  g_mutex_free (thiz->streams_lock);
-
-  g_free (thiz->temp_location);
+  g_free (btdemux->temp_location);
 
   G_OBJECT_CLASS (gst_bt_demux_parent_class)->dispose (object);
 }
@@ -1590,28 +1614,28 @@ static void
 gst_bt_demux_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec)
 {
-  GstBtDemux *thiz = NULL;
+  GstBtDemux *btdemux;
 
   g_return_if_fail (GST_IS_BT_DEMUX (object));
 
-  thiz = GST_BT_DEMUX (object);
+  btdemux = GST_BT_DEMUX (object);
 
   switch (prop_id) {
     case PROP_SELECTOR_POLICY:
-      thiz->policy = (GstBtDemuxSelectorPolicy)g_value_get_enum (value);
+      btdemux->policy = (GstBtDemuxSelectorPolicy)g_value_get_enum (value);
       break;
 
     case PROP_TYPEFIND:
-      thiz->typefind = g_value_get_boolean (value);
+      btdemux->typefind = g_value_get_boolean (value);
       break;
 
     case PROP_TEMP_REMOVE:
-      thiz->temp_remove = g_value_get_boolean (value);
+      btdemux->temp_remove = g_value_get_boolean (value);
       break;
 
     case PROP_TEMP_LOCATION:
-      g_free (thiz->temp_location);
-      thiz->temp_location = g_strdup (g_value_get_string (value));
+      g_free (btdemux->temp_location);
+      btdemux->temp_location = g_strdup (g_value_get_string (value));
       break;
 
     default:
@@ -1624,30 +1648,31 @@ static void
 gst_bt_demux_get_property (GObject * object, guint prop_id, GValue * value,
     GParamSpec * pspec)
 {
-  GstBtDemux *thiz = NULL;
+  GstBtDemux *btdemux;
 
   g_return_if_fail (GST_IS_BT_DEMUX (object));
 
-  thiz = GST_BT_DEMUX (object);
+  btdemux = GST_BT_DEMUX (object);
+
   switch (prop_id) {
     case PROP_N_STREAMS:
-      g_value_set_int (value, g_slist_length (thiz->streams));
+      g_value_set_int (value, g_slist_length (btdemux->streams));
       break;
 
     case PROP_SELECTOR_POLICY:
-      g_value_set_enum (value, thiz->policy);
+      g_value_set_enum (value, btdemux->policy);
       break;
 
     case PROP_TYPEFIND:
-      g_value_set_boolean (value, thiz->typefind);
+      g_value_set_boolean (value, btdemux->typefind);
       break;
 
     case PROP_TEMP_REMOVE:
-      g_value_set_boolean (value, thiz->temp_remove);
+      g_value_set_boolean (value, btdemux->temp_remove);
       break;
 
     case PROP_TEMP_LOCATION:
-      g_value_set_string (value, thiz->temp_location);
+      g_value_set_string (value, btdemux->temp_location);
       break;
 
     default:
@@ -1724,12 +1749,15 @@ gst_bt_demux_class_init (GstBtDemuxClass * klass)
 }
  
 static void
-gst_bt_demux_init (GstBtDemux * thiz)
+gst_bt_demux_init (GstBtDemux * btdemux)
 {
   using namespace libtorrent;
-  GstPad *pad;
-  session *s;
 
+  GstPad *pad;
+
+  session *s;
+  settings_pack session_settings;
+  
   pad = gst_pad_new_from_static_template (&sink_factory, "sink");
 #if HAVE_GST_1
   gst_pad_set_chain_function (pad, gst_bt_demux_sink_chain);
@@ -1739,31 +1767,29 @@ gst_bt_demux_init (GstBtDemux * thiz)
   gst_pad_set_event_function (pad, gst_bt_demux_sink_event_simple);
 #endif
 
-  gst_element_add_pad (GST_ELEMENT (thiz), pad);
+  gst_element_add_pad (GST_ELEMENT (btdemux), pad);
 
   /* to store the buffers from upstream until we have a full torrent file */
-  thiz->adapter = gst_adapter_new ();
+  btdemux->adapter = gst_adapter_new ();
 
-  thiz->streams_lock = g_mutex_new ();
-
-  /* create a new session */
-  s = new session ();
   /* set the error alerts and the progress alerts */
-  s->set_alert_mask (alert::error_notification | alert::progress_notification |
-      alert::status_notification);
-  thiz->session = s;
+  session_settings.set_int(settings_pack::alert_mask,
+          alert::error_notification | alert::progress_notification | alert::status_notification);
+  /* create a new session */
+  s = new session (session_settings);
+ btdemux->session = s;
 
 #if HAVE_GST_1
-  g_rec_mutex_init (&thiz->task_lock);
+  g_rec_mutex_init (&btdemux->task_lock);
 #else
-  g_static_rec_mutex_init (&thiz->task_lock);
+  g_static_rec_mutex_init (&btdemux->task_lock);
 #endif
 
   /* default properties */
-  thiz->policy = GST_BT_DEMUX_SELECTOR_POLICY_LARGER;
-  thiz->buffer_pieces = DEFAULT_BUFFER_PIECES;
-  thiz->typefind = DEFAULT_TYPEFIND;
-  thiz->temp_location = g_build_path (G_DIR_SEPARATOR_S, g_get_tmp_dir (), DEFAULT_DIR,
+  btdemux->policy = GST_BT_DEMUX_SELECTOR_POLICY_LARGER;
+  btdemux->buffer_pieces = DEFAULT_BUFFER_PIECES;
+  btdemux->typefind = DEFAULT_TYPEFIND;
+  btdemux->temp_location = g_build_path (G_DIR_SEPARATOR_S, g_get_tmp_dir (), DEFAULT_DIR,
       NULL);
-  thiz->temp_remove = DEFAULT_TEMP_REMOVE;
+  btdemux->temp_remove = DEFAULT_TEMP_REMOVE;
 }
