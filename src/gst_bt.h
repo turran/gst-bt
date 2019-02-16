@@ -26,8 +26,6 @@
 
 /* For compatibility */
 
-#if HAVE_GST_1
 #define GST_FLOW_UNEXPECTED GST_FLOW_EOS
-#endif
 
 #endif

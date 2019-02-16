@@ -112,11 +112,8 @@ typedef struct _GstBtDemux
   gpointer session;
 
   GstTask *task;
-#if HAVE_GST_1
   GRecMutex task_lock;
-#else
-  GStaticRecMutex task_lock;
-#endif
+
 } GstBtDemux;
 
 typedef struct _GstBtDemuxClass

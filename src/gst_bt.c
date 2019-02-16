@@ -25,11 +25,7 @@
 #include "gst_bt_demux.hpp"
 #include "gst_bt_type.h"
 
-#if HAVE_GST_1
 #define PLUGIN_NAME bt
-#else
-#define PLUGIN_NAME "bt"
-#endif
 
 GST_DEBUG_CATEGORY (gst_bt_demux_debug);
 GST_DEBUG_CATEGORY (gst_bt_src_debug);

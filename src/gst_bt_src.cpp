@@ -38,7 +38,6 @@ gst_bt_src_set_uri (GstBtSrc * thiz, const gchar * uri);
 /*----------------------------------------------------------------------------*
  *                            The URI interface                               *
  *----------------------------------------------------------------------------*/
-#if HAVE_GST_1
 static GstURIType
 gst_bt_src_uri_get_type (GType type)
 {
@@ -69,40 +68,6 @@ gst_bt_src_uri_get_uri (GstURIHandler * handler)
   return g_strdup (thiz->uri);
 }
 
-#else
-
-static GstURIType
-gst_bt_src_uri_get_type (void)
-{
-  return GST_URI_SRC;
-}
-
-static gchar **
-gst_bt_src_uri_get_protocols (void)
-{
-  static gchar *protocols[] = { (char *) "magnet", NULL };
-
-  return protocols;
-}
-
-static gboolean
-gst_bt_src_uri_set_uri (GstURIHandler * handler, const gchar * uri)
-{
-  GstBtSrc *thiz = GST_BT_SRC (handler);
-  gst_bt_src_set_uri (thiz, uri);
-  return TRUE;
-}
-
-static const gchar *
-gst_bt_src_uri_get_uri (GstURIHandler * handler)
-{
-  GstBtSrc *thiz = GST_BT_SRC (handler);
-
-  return thiz->uri;
-}
-
-#endif
-
 static void
 gst_bt_src_uri_handler_init (gpointer g_iface, gpointer iface_data)
 {
@@ -122,35 +87,9 @@ enum {
   PROP_URI,
 };
 
-#if HAVE_GST_1
-
 G_DEFINE_TYPE_WITH_CODE (GstBtSrc, gst_bt_src, GST_TYPE_ELEMENT,
     G_IMPLEMENT_INTERFACE (GST_TYPE_URI_HANDLER,
         gst_bt_src_uri_handler_init));
-#else
-
-static gboolean
-gst_bt_src_interface_supported (GstImplementsInterface * iface, GType type)
-{
-  if (type == GST_TYPE_URI_HANDLER)
-    return TRUE;
-  else
-    return FALSE;
-}
-
-static void
-gst_bt_src_interface_init (GstImplementsInterfaceClass * klass)
-{
-  klass->supported = gst_bt_src_interface_supported;
-}
-
-G_DEFINE_TYPE_WITH_CODE (GstBtSrc, gst_bt_src, GST_TYPE_ELEMENT,
-    G_IMPLEMENT_INTERFACE (GST_TYPE_IMPLEMENTS_INTERFACE,
-        gst_bt_src_interface_init);
-    G_IMPLEMENT_INTERFACE (GST_TYPE_URI_HANDLER,
-        gst_bt_src_uri_handler_init));
-
-#endif
 
 static GstStaticPadTemplate src_factory =
     GST_STATIC_PAD_TEMPLATE ("src",
@@ -208,9 +147,7 @@ gst_bt_src_handle_alert (GstBtSrc * thiz, const libtorrent::alert * a)
         GstBuffer *buf;
         GstPad *pad;
         guint8 *data;
-#if HAVE_GST_1
         GstMapInfo mi;
-#endif
 
         s = (session *)thiz->session;
         h.pause ();
@@ -221,18 +158,12 @@ gst_bt_src_handle_alert (GstBtSrc * thiz, const libtorrent::alert * a)
         bencode(std::back_inserter(buffer), te);
 
         buf = gst_buffer_new_and_alloc (buffer.size());
-#if HAVE_GST_1
         gst_buffer_map (buf, &mi, GST_MAP_WRITE);
         data = mi.data;
-#else
-        data = GST_BUFFER_DATA (buf);
-#endif
 
         memcpy (data, &buffer[0], buffer.size());
 
-#if HAVE_GST_1
         gst_buffer_unmap (buf, &mi);
-#endif
 
         pad = gst_element_get_static_pad (GST_ELEMENT (thiz), "src");
         GST_DEBUG_OBJECT (thiz, "Pushing torrent info downstrean");
@@ -319,11 +250,7 @@ static void
 gst_bt_src_task_setup (GstBtSrc * thiz)
 {
   /* to pop from the libtorrent async system */
-#if HAVE_GST_1
   thiz->task = gst_task_new (gst_bt_src_loop, thiz, NULL);
-#else
-  thiz->task = gst_task_create (gst_bt_src_loop, thiz);
-#endif
   gst_task_set_lock (thiz->task, &thiz->task_lock);
   gst_task_start (thiz->task);
 }
@@ -509,9 +436,5 @@ gst_bt_src_init (GstBtSrc * thiz)
   s = new session (session_settings);
   thiz->session = s;
 
-#if HAVE_GST_1
   g_rec_mutex_init (&thiz->task_lock);
-#else
-  g_static_rec_mutex_init (&thiz->task_lock);
-#endif
 }

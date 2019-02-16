@@ -47,11 +47,8 @@ typedef struct _GstBtSrc
   gboolean finished;
 
   GstTask *task;
-#if HAVE_GST_1
   GRecMutex task_lock;
-#else
-  GStaticRecMutex task_lock;
-#endif
+
 } GstBtSrc;
 
 typedef struct _GstBtSrcClass

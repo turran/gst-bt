@@ -72,10 +72,6 @@ case "$gstreamer_api" in
   gst_bt_requirements_pc+=" gstreamer-1.0 gstreamer-base-1.0"
   AC_DEFINE_UNQUOTED(HAVE_GST_1, [1], [Use GStreamer 1.0])
   ;;
-  0.10)
-  gst_bt_requirements_pc+=" gstreamer-0.10 gstreamer-base-0.10"
-  AC_DEFINE_UNQUOTED(HAVE_GST_0, [1], [Use GStreamer 0.10])
-  ;;
   *)
   AC_MSG_ERROR([Unsupported gstreamer version "$gstreamer_api"])
   ;;
