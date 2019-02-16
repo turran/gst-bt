@@ -434,22 +434,32 @@ gst_bt_demux_stream_info (GstBtDemuxStream * btstream,
     gint64 * size)
 {
   using namespace libtorrent;
-  file_entry fe;
+  // file_slice fe;
   int piece_length;
-  torrent_info ti = h.get_torrent_info ();
+  auto ti = h.torrent_file();
+  auto & files = ti->files();
 
-  piece_length = ti.piece_length ();
-  fe = ti.file_at (btstream->idx);
+  gint file_offset;
+  gint file_size;
+  
+  file_offset = (gint) files.file_offset(btstream->idx);
+  file_size = (gint)files.file_size(btstream->idx);
+  piece_length = ti->piece_length ();
+
+  // fe = ti->file_at (btstream->idx);
+
+  // TODO: verify !
+
   if (start_piece)
-    *start_piece = fe.offset / piece_length;
+    *start_piece = file_offset / piece_length;
   if (start_offset)
-    *start_offset = fe.offset % piece_length;
+    *start_offset = file_offset % piece_length;
   if (end_piece)
-    *end_piece = (fe.offset + fe.size) / piece_length;
+    *end_piece = (file_offset + file_size) / piece_length;
   if (end_offset)
-    *end_offset = (fe.offset + fe.size) % piece_length;
+    *end_offset = (file_offset + file_size) % piece_length;
   if (size)
-    *size = fe.size;
+    *size = file_size;
 }
 
 static gboolean
@@ -476,8 +486,8 @@ gst_bt_demux_stream_seek (GstBtDemuxStream * btstream, GstEvent * event)
   gst_object_unref (btdemux);
 
   /* get the piece length */
-  torrent_info ti = h.get_torrent_info ();
-  piece_length = ti.piece_length ();
+  auto ti = h.torrent_file();
+  piece_length = ti->piece_length ();
 
   gst_event_parse_seek (event, &rate, &format, &flags, &start_type,
       &start, &stop_type, &stop);
@@ -845,7 +855,7 @@ gst_bt_demux_get_stream_tags (GstBtDemux * btdemux, gint stream)
 {
   using namespace libtorrent;
   session *s;
-  file_entry fe;
+  // file_entry fe;
   std::vector<torrent_handle> torrents;
   int i;
 
@@ -856,10 +866,12 @@ gst_bt_demux_get_stream_tags (GstBtDemux * btdemux, gint stream)
   s = (session *)btdemux->session;
   torrents = s->get_torrents ();
 
-  torrent_info ti = torrents[0].get_torrent_info ();
+  auto ti = torrents[0].torrent_file();
+  if (!ti)
+      return NULL;
 
-  for (i = 0; i < ti.num_files (); i++) {
-    file_entry fe = ti.file_at (i);
+  for (i = 0; i < ti->num_files (); i++) {
+    // file_entry fe = ti->file_at (i);
 
     /* TODO get the stream tags (i.e metadata) */
     /* set the file name */
@@ -890,7 +902,7 @@ gst_bt_demux_get_policy_streams (GstBtDemux * btdemux)
 
     case GST_BT_DEMUX_SELECTOR_POLICY_LARGER:
       {
-        file_entry fe;
+        gint max_file_size;
         session *s;
         std::vector<torrent_handle> torrents;
         int i;
@@ -901,17 +913,22 @@ gst_bt_demux_get_policy_streams (GstBtDemux * btdemux)
         if (torrents.size () < 1)
           break;
 
-        torrent_info ti = torrents[0].get_torrent_info ();
-        if (ti.num_files () < 1)
+        auto ti = torrents[0].torrent_file();
+        if (!ti)
+            break;
+        if (ti->num_files () < 1)
           break;
 
-        fe = ti.file_at (0);
-        for (i = 0; i < ti.num_files (); i++) {
-          file_entry fee = ti.file_at (i);
+        auto& files = ti->files();
+
+        max_file_size = files.file_size(0);
+
+        for (i = 1; i < ti->num_files (); i++) {
+            gint file_size = files.file_size(i);
 
           /* get the larger file */
-          if (fee.size > fe.size) {
-            fe = fee;
+          if (file_size > max_file_size) {
+              max_file_size = file_size;
             index = i;
           }
         }
@@ -1128,7 +1145,8 @@ gst_bt_demux_handle_alert (GstBtDemux * btdemux, const libtorrent::alert * a)
           for (i = 0; i < p->params.ti->num_files (); i++) {
             GstBtDemuxStream *stream;
             gchar *name;
-            file_entry fe;
+
+            // file_entry fe;
 
             /* create the pads */
             name = g_strdup_printf ("src_%02d", i);
@@ -1143,8 +1161,11 @@ gst_bt_demux_handle_alert (GstBtDemux * btdemux, const libtorrent::alert * a)
             stream->idx = i;
 
             /* set the path */
-            fe =  p->params.ti->file_at (i);
-            stream->path = g_strdup (fe.path.c_str ());
+            // TODO: verify this is correct!
+
+            // fe =  p->params.ti->file_at (i);
+            // stream->path = g_strdup (fe.path.c_str ());
+            stream->path = g_strdup (p->params.ti->files().file_path(i).c_str());
 
             /* get the pieces and offsets related to the file */
             gst_bt_demux_stream_info (stream, h, &stream->start_offset,

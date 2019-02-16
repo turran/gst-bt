@@ -142,7 +142,7 @@ gst_bt_src_handle_alert (GstBtSrc * thiz, const libtorrent::alert * a)
         const metadata_received_alert *p = alert_cast<metadata_received_alert>(a);
         session *s;
         torrent_handle h = p->handle;
-        torrent_info ti = h.get_torrent_info ();
+        auto ti = h.torrent_file();
         std::vector<char> buffer;
         GstBuffer *buf;
         GstPad *pad;
@@ -153,7 +153,8 @@ gst_bt_src_handle_alert (GstBtSrc * thiz, const libtorrent::alert * a)
         h.pause ();
         s->remove_torrent (h);
 
-        create_torrent ct(ti);
+        create_torrent ct (*ti);
+
         entry te = ct.generate();
         bencode(std::back_inserter(buffer), te);
 
